@@ -1,0 +1,52 @@
+[workspace]
+authors = ["shi_jie <1592277253@qq.com>"]
+channels = ["astra-toolbox", "conda-forge"]
+name = "3DGR_OURS"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+
+[system-requirements]
+cuda = "12.0"
+
+[pypi-options]
+index-url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+
+[activation.env]
+PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True"
+CUDA_VISIBLE_DEVICES = "1"
+
+
+[tasks]
+pytest = "pytest"
+
+[dependencies]
+pytorch-gpu = "==2.8.0"
+tqdm = ">=4.67.1,<5"
+torchio = ">=0.20.22,<0.21"
+nibabel = ">=5.3.2,<6"
+monai = ">=1.5.1,<2"
+tifffile = ">=2025.9.20,<2026"
+cupy = ">=13.6.0,<14"
+einops = ">=0.8.1,<0.9"
+imageio = ">=2.37.0,<3"
+jsonargparse = ">=4.40.2,<5"
+pip = "*"
+notebook = "*"
+pytest = "*"
+scikit-image = ">=0.25.2,<0.26"
+typer = ">=0.20.0,<0.21"
+pytorch3d = ">=0.7.7,<0.8"
+odl = ">=0.8.3,<0.9"
+astra-toolbox = ">=2.4.0,<3"
+
+
+[pypi-dependencies]
+torchcpd = { git = "https://github.com/BloomingStone/CPD-Pytorch.git", rev = "28ad5b70390ebee6caf5162d1acff70d2cacb66c" }
+opencv-python-headless = ">=4.11.0.86, <5"
+diffdrr = ">=0.6.0, <0.7"
+pyacvd = ">=0.3.2, <0.4"
+pyvista = { version = ">=0.46.3, <0.47", extras = ["all"] }
+pytest-line-profiler = ">=0.2.1, <0.3"
+pytest-profiling = ">=1.8.1, <2"
+
