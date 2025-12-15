@@ -20,7 +20,6 @@ from pytorch3d.renderer import (
 )
 from pytorch3d.structures import Meshes
 import pyvista as pv
-import pyacvd
 import nibabel as nib
 from tqdm import tqdm
 
@@ -207,16 +206,15 @@ def get_mesh_in_voxel(label: Tensor, device: torch.device, max_points: int=10000
     mesh = pv.wrap(label_big)\
         .contour([1], method='marching_cubes')\
         .smooth_taubin(
-            n_iter=50, pass_band=0.001, normalize_coordinates=True)\
-        .triangulate().clean().triangulate()
-    try:
-        cluster = pyacvd.Clustering(mesh)
-        cluster.cluster(max_points)
-        
-        mesh: pv.PolyData = cluster.create_mesh().triangulate().clean()  # type: ignore
-    except Exception as e:
-        import logging
-        logging.warning(f"pyacvd clustering failed: {e}, use original mesh")
+            n_iter=30, pass_band=0.001, normalize_coordinates=True)\
+        .triangulate()\
+        .decimate_pro(
+            reduction=0.8,          # 减少 80% 三角面片
+            preserve_topology=True, # 防止破洞
+            feature_angle=30.0
+        )\
+        .triangulate()\
+        .clean()
     mesh.points /= 2.0  # 因为上采样了2倍，所以点坐标要除以2
     return mesh
 
@@ -517,8 +515,11 @@ def process_single_file(nii_file, num_projs, proj_size, output_dir):
     return res
 
 if __name__ == '__main__':
-    input_dir=Path("data/nii")
-    output_dir=Path("data/nii_projs")
+    # input_dir=Path("data/nii")
+    # output_dir=Path("data/nii_projs")
+    
+    input_dir=Path("data/nii_size320_spacing0-4")
+    output_dir=Path("data/nii_size320_spacing0-4_projs")
     
     proj_size: tuple[int, int] = (512, 512)
     num_projs: tuple[int, ...] = (2, 4, 8, 16, 32)

@@ -9,6 +9,11 @@ import cv2
 from tqdm import tqdm
 from nibabel.nifti1 import Nifti1Image
 from nibabel.loadsave import save as nib_save
+from matplotlib import pyplot as plt
+import matplotlib.animation as animation
+import matplotlib
+
+matplotlib.use("Agg")
 
 
 def save_nii(
@@ -75,31 +80,40 @@ def save_gif(
     fps_gif: int = 30,
     **imshow_kwargs
 ) -> None:
-    from matplotlib import pyplot as plt
-    import matplotlib.animation as animation
-    import matplotlib
-    
-    matplotlib.use("Agg")
-    
     frames = frames.squeeze()
     frames_np = frames.cpu().numpy() if isinstance(frames, torch.Tensor) else frames
-    fig, ax = plt.subplots()
-    ax.axis('off')  # Turn off axis
-    ax.set_xticks([])  # Remove x-axis ticks
-    ax.set_yticks([])  # Remove y-axis ticks
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['bottom'].set_visible(False)
-    ax.spines['left'].set_visible(False)
+
+    h, w = frames_np.shape[1], frames_np.shape[2]
+
+    dpi = 100
+    fig = plt.figure(figsize=(w / dpi, h / dpi), dpi=dpi)
+    ax = plt.axes((0, 0, 1, 1))  # 填满整个 figure
+    ax.axis("off")
+
     ims = []
-    
     for i in range(frames_np.shape[0]):
         im = ax.imshow(frames_np[i], animated=True, **imshow_kwargs)
         ims.append([im])
-    
-    ani = animation.ArtistAnimation(fig, ims, interval=1000/fps_gif, blit=True, repeat_delay=1000)
+
+    ani = animation.ArtistAnimation(
+        fig,
+        ims,
+        interval=1000 / fps_gif,
+        blit=True,
+        repeat_delay=1000
+    )
+
     writer = animation.PillowWriter(fps=fps_gif)
-    ani.save(output_path, writer=writer)
+    ani.save(
+        output_path,
+        writer=writer,
+        dpi=dpi,
+        savefig_kwargs={
+            "pad_inches": 0
+        }
+    )
+
+    plt.close(fig)
 
 
 def save_deepthmap_gif(
@@ -107,29 +121,16 @@ def save_deepthmap_gif(
     depth_maps: torch.Tensor | np.ndarray,
     fps_gif: int = 30
 ) -> None:
-    from matplotlib import pyplot as plt
-    import matplotlib.animation as animation
-    import matplotlib
-    
-    matplotlib.use("Agg")
-    
     depth_maps = depth_maps.squeeze()
     depth_maps_np = depth_maps.cpu().numpy() if isinstance(depth_maps, torch.Tensor) else depth_maps
-    fig, ax = plt.subplots()
-    ax.axis('off')  # Turn off axis
-    ax.set_xticks([])  # Remove x-axis ticks
-    ax.set_yticks([])  # Remove y-axis ticks
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['bottom'].set_visible(False)
-    ax.spines['left'].set_visible(False)
-    ims = []
     vmin = np.min(depth_maps_np[depth_maps_np>0])
     vmax = np.max(depth_maps_np)
-    for i in range(depth_maps_np.shape[0]):
-        im = ax.imshow(depth_maps_np[i], animated=True, vmin=vmin, vmax=vmax)
-        ims.append([im])
     
-    ani = animation.ArtistAnimation(fig, ims, interval=1000/fps_gif, blit=True, repeat_delay=1000)
-    writer = animation.PillowWriter(fps=fps_gif)
-    ani.save(output_path, writer=writer)
+    save_gif(
+        output_path,
+        depth_maps_np,
+        fps_gif=fps_gif,
+        cmap='gray',
+        vmin=vmin,
+        vmax=vmax
+    )
