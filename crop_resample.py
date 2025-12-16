@@ -67,6 +67,26 @@ def save_nii(
     nib.loadsave.save(nib.nifti1.Nifti1Image(data, affine), p_nii)
     return p_nii
 
+def save_pt(
+    out_dir: str|Path,
+    base_name: str,
+    branch_type: Literal["lca", "rca"],
+    data: np.ndarray,
+    affine: np.ndarray
+) -> Path:
+    import torch
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    p_pt = out_dir / f"{base_name}_{branch_type}.pt"
+    torch.save(
+        {
+            "volume": data,
+            "affine": affine
+        }, 
+        p_pt
+    )
+    return p_pt
+
 
 def crop_expanded_roi(label: np.ndarray, affine: np.ndarray, iterations: int=5) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -107,6 +127,32 @@ def crop_expanded_roi(label: np.ndarray, affine: np.ndarray, iterations: int=5) 
     affine_cropped = affine @ T
     
     return cropped, affine_cropped
+
+def make_affine_spacing_positive(data: np.ndarray, affine: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Transform data and affine to make the spacing in affine positive.
+    
+    Args:
+        data: numpy array in voxel space
+        affine: 4x4 affine matrix
+        
+    Returns:
+        data: numpy array in voxel space
+        affine: 4x4 affine matrix
+    """
+    spacing = np.diag(affine)[:3]
+    data = data.copy()
+    affine = affine.copy()
+    if spacing[0] < 0:
+        data = np.flip(data, axis=0)
+        affine[:3, 0] = -affine[:3, 0]
+    if spacing[1] < 0:
+        data = np.flip(data, axis=1)
+        affine[:3, 1] = -affine[:3, 1]
+    if spacing[2] < 0:
+        data = np.flip(data, axis=2)
+        affine[:3, 2] = -affine[:3, 2]
+    return data, affine
 
 
 def resample_to_shape(
@@ -186,15 +232,13 @@ def resample_to_shape_and_spacing(
     
     return resampled, new_affine
 
-# max_spacing = [0.4695279533043504, 0.46358331316150725, 0.4443359375]
-max_spacing = [0, 0, 0]
-
 def crop_roi_and_resample(
     input_file: Path,
     outdir: Path,
     expand: int,
     target_shape: tuple[int, int, int],
-    target_spacing: float | None
+    target_spacing: float | None,
+    saving_pt: bool = False
 ):
     assert input_file.exists(), f"Input file not found: {input_file}"
 
@@ -205,23 +249,21 @@ def crop_roi_and_resample(
         print(f"{branch_type}: {branch_label.shape}")
 
         # Compute axis-aligned cuboid ROI and expand bounds by given iterations
-        label_cropped, affine_cropped = crop_expanded_roi(branch_label, affine, iterations=expand)
+        label, affine = crop_expanded_roi(branch_label, affine, iterations=expand)
+        label, affine = make_affine_spacing_positive(label, affine)
 
         # Resample the cropped ROI to target shape (nearest to preserve binary)
         # label_resampled, affine_resampled = resample_to_shape_and_spacing(label_cropped, affine_cropped, target_shape, target_spacing)
         if target_spacing is None:
-            label_resampled, affine_resampled = resample_to_shape(label_cropped, affine_cropped, target_shape)
+            label_resampled, affine_resampled = resample_to_shape(label, affine, target_shape)
         else:
-            label_resampled, affine_resampled = resample_to_shape_and_spacing(label_cropped, affine_cropped, target_shape, target_spacing)
+            label_resampled, affine_resampled = resample_to_shape_and_spacing(label, affine, target_shape, target_spacing)
 
         base_name = input_file.stem.split('.')[0]
 
-        p_nii = save_nii(outdir, base_name, branch_type, label_resampled.astype(np.uint8), affine_resampled)
-
-        spacing = np.abs(np.diag(affine_resampled)[:3])
-        global max_spacing
-        max_spacing = [max(max_spacing[i], float(spacing[i])) for i in range(3)]
-        print(f"Saved nii.gz: {p_nii}, sapcing: {spacing}, max_spacing: {max_spacing}")
+        save_nii(outdir, base_name, branch_type, label_resampled.astype(np.uint8), affine_resampled)
+        if saving_pt:
+            save_pt(outdir, base_name, branch_type, label_resampled.astype(np.uint8), affine_resampled)
 
 
 
@@ -231,14 +273,16 @@ def main(
     expand: Annotated[int, typer.Option(help="Expand ROI by this many voxels on each side")] = 2,
     target_shape: Annotated[tuple[int, int, int], typer.Option(help="Target shape (w,h,d)")] = (256, 256, 256),
     target_spacing: Annotated[float|None, typer.Option(help="Target spacing (mm) - used for spacing adjustment if needed")] = None,
+    saving_pt: Annotated[bool, typer.Option(help="Save pt files")] = False,
 ):
     """
     Crop and resample coronary artery data by:
-    1. Loading NIfTI file or files from input path
-    2. Separating coronary branches
+    1. Loading NIfTI file or files from input path, If the input is a directory, all nii files will be iteratively searched
+    2. Separating LCA and RCA coronary branches
     3. Cropping and expanding ROIs for each branch
-    4. Resampling to target shape
-    5. Saving results as NPZ and NIfTI files
+    4. flip data and adjust affine to make spacing positive
+    5. Resampling to target shape assigned by `target_shape` (if `target_spacing` set, also resample to it by zoom and necessary padding, therefore the shape may be larger than `target_shape`)
+    6. Saving results NIfTI files. output path as `outdir/<input_nii_path_relative_to_input_path>/<input_nii_name>_<branch_type>.nii.gz`
     
     Args:
         input_path: Path to input NIfTI file or directory containing NIfTI files
@@ -251,9 +295,9 @@ def main(
     if input_path.is_dir():
         for p in input_path.rglob("*.nii.gz"):
             sub_outdir = outdir / p.parent.relative_to(input_path)
-            crop_roi_and_resample(p, sub_outdir, expand, target_shape, target_spacing)
+            crop_roi_and_resample(p, sub_outdir, expand, target_shape, target_spacing, saving_pt)
     else:
-        crop_roi_and_resample(input_path, outdir, expand, target_shape, target_spacing)
+        crop_roi_and_resample(input_path, outdir, expand, target_shape, target_spacing, saving_pt)
 
 
 if __name__ == "__main__":

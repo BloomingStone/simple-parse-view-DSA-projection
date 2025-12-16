@@ -1,12 +1,13 @@
-# copy from ct_geometry_projector.py of NERP
+# ref: ct_geometry_projector.py of NERP
+from typing import Iterable, Annotated, TypeVar
 from pathlib import Path
 import math
 from functools import partial
 from multiprocessing import Pool
 import multiprocessing as mp
-mp.set_start_method("spawn", force=True)
 
 import numpy as np
+from skimage.morphology import skeletonize
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -22,9 +23,10 @@ from pytorch3d.structures import Meshes
 import pyvista as pv
 import nibabel as nib
 from tqdm import tqdm
-
-from saver import save_gif, save_deepthmap_gif
-
+import typer
+from matplotlib import pyplot as plt
+import matplotlib.animation as animation
+import matplotlib
 
 class Initialization_ConeBeam:
     def __init__(self, image_size, num_proj, start_angle, proj_size, affine):
@@ -39,15 +41,16 @@ class Initialization_ConeBeam:
         self.proj_size = proj_size
         
         self.affine = affine
-        self.reso = np.abs(np.diag(self.affine[:3, :3]))
+        self.spacing = np.abs(np.diag(self.affine[:3, :3]))
 
+        # TODO 目前仅支持 spacing 为正数的情况，后续根据affine进行变换
         ## Imaging object (reconstruction objective) with object center as origin
         self.param['nx'] = image_size[0]
         self.param['ny'] = image_size[1]
         self.param['nz'] = image_size[2]
-        self.param['sx'] = self.param['nx']*self.reso[0]
-        self.param['sy'] = self.param['ny']*self.reso[1]
-        self.param['sz'] = self.param['nz']*self.reso[2]
+        self.param['sx'] = self.param['nx']*self.spacing[0]
+        self.param['sy'] = self.param['ny']*self.spacing[1]
+        self.param['sz'] = self.param['nz']*self.spacing[2]
 
         ## Projection view angles (ray directions)
         self.param['start_angle'] = start_angle
@@ -55,12 +58,15 @@ class Initialization_ConeBeam:
         self.param['nProj'] = num_proj
 
         ## Detector
+        dh = 512 * 0.3 / proj_size[0]   # default proj size is 512 and dh = dw = 0.3
+        dw = 512 * 0.3 / proj_size[1]
         self.param['nh'] = proj_size[0] # shape of sinogram is proj_size*proj_size
         self.param['nw'] = proj_size[1]
-        self.param['sh'] = self.param['nh']*0.3
-        self.param['sw'] = self.param['nw']*0.3
+        self.param['sh'] = self.param['nh']*dh
+        self.param['sw'] = self.param['nw']*dw
         self.param['dde'] = 400 # distance between origin and detector center (assume in x axis)
         self.param['dso'] = 1400 # distance between origin and source (assume in x axis)
+
 
 def build_conebeam_gemotry(param):
     # Reconstruction space:
@@ -108,46 +114,19 @@ def build_conebeam_gemotry(param):
     return reco_space, ray_trafo, FBPOper
 
 
-# Projector
 class Projection_ConeBeam(nn.Module):
     def __init__(self, param):
         super(Projection_ConeBeam, self).__init__()
         self.param = param
-        self.reso = param.reso
         
         # RayTransform operator
         reco_space, ray_trafo, FBPOper = build_conebeam_gemotry(self.param)
         
         # Wrap pytorch module
         self.trafo = odl_torch.OperatorModule(ray_trafo)
-        
-        self.back_projector = odl_torch.OperatorModule(ray_trafo.adjoint)
 
     def forward(self, x):
         return self.trafo(x)
-    
-    def back_projection(self, x):
-        x = self.back_projector(x)
-        return x
-
-
-# FBP reconstruction
-class FBP_ConeBeam(nn.Module):
-    def __init__(self, param):
-        super(FBP_ConeBeam, self).__init__()
-        self.param = param
-        self.reso = param.reso
-        
-        reco_space, ray_trafo, FBPOper = build_conebeam_gemotry(self.param)
-        
-        self.fbp = odl_torch.OperatorModule(FBPOper)
-
-    def forward(self, x):
-        x = self.fbp(x)
-        return x
-
-    def filter_function(self, x):
-        raise NotImplementedError
 
 
 def get_geo(image_size, proj_size, num_proj, affine):
@@ -165,138 +144,123 @@ def get_geo(image_size, proj_size, num_proj, affine):
     return geo_param
 
 
-class ConeBeam3DProjector():
-    def __init__(self, geo_param: Initialization_ConeBeam):
-        # Forward projection function
-        self.forward_projector = Projection_ConeBeam(geo_param)
-
-        # Filtered back-projection
-        self.fbp = FBP_ConeBeam(geo_param)
-
-    def forward_project(self, volume):
-        '''
-        Arguments:
-            volume: torch tensor with input size (B, C, img_x, img_y, img_z)
-        '''
-
-        proj_data = self.forward_projector(volume)
-
-        return proj_data
-
-    def backward_project(self, projs):
-        '''
-        Arguments:
-            projs: torch tensor with input size (B, num_proj, proj_size_h, proj_size_w)
-        '''
-
-        volume = self.fbp(projs)
-
-        return volume
-    
-    def freeze(self):
-        for param in self.forward_projector.parameters():
-            param.requires_grad = False
-        for param in self.fbp.parameters():
-            param.requires_grad = False
-
-
-def get_mesh_in_voxel(label: Tensor, device: torch.device, max_points: int=10000) -> pv.PolyData:
-    label_big = F.interpolate(label.squeeze()[None, None].to(torch.float16).to(device), scale_factor=2, mode='nearest').cpu().numpy().squeeze()
-    label_big = (label_big>0.5).astype(np.uint8)
-    mesh = pv.wrap(label_big)\
+def get_mesh_in_voxel(label: Tensor) -> pv.PolyData:
+    label_np = label.squeeze().cpu().numpy().astype(np.uint8)
+    mesh = pv.wrap(label_np)\
         .contour([1], method='marching_cubes')\
-        .smooth_taubin(
-            n_iter=30, pass_band=0.001, normalize_coordinates=True)\
-        .triangulate()\
-        .decimate_pro(
-            reduction=0.8,          # 减少 80% 三角面片
-            preserve_topology=True, # 防止破洞
-            feature_angle=30.0
-        )\
+        .smooth_taubin()\
         .triangulate()\
         .clean()
-    mesh.points /= 2.0  # 因为上采样了2倍，所以点坐标要除以2
     return mesh
 
-def get_mesh_in_world(label: Tensor, affine: np.ndarray, device: torch.device, max_points: int=10000) -> pv.PolyData:
-    mesh = get_mesh_in_voxel(label, device, max_points)
+
+def get_mesh_in_world(label: Tensor, affine: np.ndarray) -> pv.PolyData:
+    mesh = get_mesh_in_voxel(label)
     mesh.points = apply_affine(mesh.points, affine)
     return mesh
 
-def apply_affine(points: Tensor | np.ndarray, affine: np.ndarray) -> np.ndarray:
-    assert len(points.shape) == 2 and points.shape[-1] == 3
-    if isinstance(points, np.ndarray):
-        points = torch.from_numpy(points)
-    points = points.to(torch.float32)
-    _affine = torch.from_numpy(affine).to(device=points.device, dtype=points.dtype)
-    new_points = F.pad(points, (0, 1), "constant", 1)   # shape=(N, 4), [x, y, z, 1]
-    new_points = new_points @ _affine.T
-    new_points = new_points[:, :3]
-    return new_points.cpu().numpy()
+
+def get_label_clouds_in_world(label: Tensor, affine: np.ndarray) -> Tensor:
+    clouds = torch.stack(torch.where(label), dim=-1)
+    clouds = apply_affine(clouds, affine)  # to world
+    return clouds
 
 
-def _axis_angle_rotation(axis: str, angle: torch.Tensor) -> torch.Tensor:
+ArrayLike = TypeVar("ArrayLike", bound=Tensor|np.ndarray)
+def apply_affine(
+    points: ArrayLike,
+    affine: np.ndarray,
+) -> ArrayLike:
     """
-    Return the rotation matrices for one of the rotations about an axis
-    of which Euler angles describe, for each value of the angle given.
+    points:
+        (3,) or (N, 3), Tensor or numpy.ndarray
+    affine:
+        (4, 4), Tensor or numpy.ndarray
 
-    Args:
-        axis: Axis label "X" or "Y or "Z".
-        angle: any shape tensor of Euler angles in radians
-
-    Returns:
-        Rotation matrices as tensor of shape (..., 3, 3).
+    return:
+        same type as points
     """
+    is_numpy = isinstance(points, np.ndarray)
+    is_single_point = (points.ndim == 1)
 
-    cos = torch.cos(angle)
-    sin = torch.sin(angle)
-    one = torch.ones_like(angle)
-    zero = torch.zeros_like(angle)
-
-    if axis == "X":
-        R_flat = (one, zero, zero, zero, cos, -sin, zero, sin, cos)
-    elif axis == "Y":
-        R_flat = (cos, zero, sin, zero, one, zero, -sin, zero, cos)
-    elif axis == "Z":
-        R_flat = (cos, -sin, zero, sin, cos, zero, zero, zero, one)
+    # -------- shape check --------
+    if is_single_point:
+        assert points.shape == (3,)
     else:
-        raise ValueError("letter must be either X, Y or Z.")
+        assert points.ndim == 2 and points.shape[-1] == 3
 
-    res = torch.eye(4)
-    res[:3, :3] = torch.stack(R_flat, -1).reshape(angle.shape + (3, 3))
-    return res
+    # -------- to tensor --------
+    if is_numpy:
+        pts = torch.from_numpy(points)
+    else:
+        pts = points
+
+    aff = torch.from_numpy(affine)
+    pts = pts.to(dtype=torch.float32)
+    aff = aff.to(device=pts.device, dtype=pts.dtype)
+
+    # (3,) -> (1, 3)
+    if is_single_point:
+        pts = pts.unsqueeze(0)
+
+    # -------- affine transform --------
+    pts_h = F.pad(pts, (0, 1), value=1)   # (N, 4)
+    out = pts_h @ aff.T
+    out = out[:, :3]
+
+    # (1, 3) -> (3,)
+    if is_single_point:
+        out = out.squeeze(0)
+
+    # -------- return same type --------
+    if is_numpy:
+        return out.cpu().numpy()  # type: ignore
+    else:
+        return out               # type: ignore
 
 
 class Torch3DLabelRenderer:
-    def __init__(self, geo_param: Initialization_ConeBeam):
+    def __init__(self, geo_param: Initialization_ConeBeam, device: torch.device):
         self.geo_param = geo_param
         nw = geo_param.param['nw']
         nh = geo_param.param['nh']
-        sdd = geo_param.param['dde'] + geo_param.param['dso']
-        sh = geo_param.param['sh']  # size of height
+        d_so = geo_param.param['dso']   # distance of sorce to origin of world
+        d_do = geo_param.param['dde']   # distance of detector to origin of world
+        d_sd = d_so + d_do
+        sh = geo_param.param['sh']  # size of height of detector
         
-        self.fov = 2 * math.atan(sh / 2 / sdd) / math.pi * 180
+        self.fov = 2 * math.atan(sh / 2 / d_sd) / math.pi * 180
         self.width = int(nw)
         self.height = int(nh)
-        self.zfar = sdd*1.2
+        
+        self.bound = max(self.geo_param.param["sx"], self.geo_param.param["sy"])
+        # self.zfar - self.znear = self.bound
+        self.znear = d_so - self.bound/2
+        self.zfar = d_so + self.bound/2
+        
         self.raster_settings = RasterizationSettings(
             image_size=(self.height, self.width),
             blur_radius=0.0,
-            faces_per_pixel=1
+            faces_per_pixel=1,
+            max_faces_per_bin=50000,
+            bin_size=0
         )
-        if torch.cuda.is_available():
-            self.device = torch.device("cuda:0")
-        else:
-            raise RuntimeError("No CUDA device available for Torch3DLabelRenderer")
+        self.device = device
         
         self.geo = self._build_geometry(self.geo_param)
         
-        # Rotates the C-arm about the x-axis by 90 degrees
-        self.reorient_rot = np.array([
-            [1,  0,  0 ],
-            [0,  0,  -1],
-            [0,  1,  0 ]],
-            dtype=np.float32
+        # in pytorch3D, for the camera, z is front, y is up. need to reorient the camera
+        # to front is Y and up is Z. 
+        self.reorient_rot = torch.tensor([
+            [-1,  0,  0 ],
+            [0,   0,  1 ],
+            [0,   1,  0 ]],
+            #^    ^   ^
+            #|    |   |--column 3 (k) is the front direction of camera, align at +Y (0, 1, 0)
+            #|    |--column 2 (j) is the up direction of camera, align at +Z (0, 0, 1)
+            #|--column 1 (i) is the left direction of camera, align at -X (-1, 0, 0)
+            dtype=torch.float32,
+            device=self.device
         )
     
     @staticmethod
@@ -323,98 +287,214 @@ class Torch3DLabelRenderer:
         ) # rotation axis is z-axis: (0, 0, 1)
         return geometry
     
-    def _calculate_R_T(self, angle: float) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        cauculate R T manully by angle
-        """
-        R_z_alpha = _axis_angle_rotation("Z", torch.tensor(angle))
-        translate = torch.eye(4)
-        sod = self.geo_param.param['dso']
-        translate[:3, 3] = torch.tensor([0.0, sod, 0.0])
-        reorient = torch.tensor(
-            [
-                [1, 0, 0, 0],
-                [0, 0, -1, 0],
-                [0, 1, 0, 0],
-                [0, 0, 0, 1],
-            ],
-            dtype=torch.float32,
-        )
-        
-        # internal rotation (zxy) can translate to external rotation with oppisite order (YXZ), so here first rotate around X_world, then Y_world
-        M_c2w_gt = R_z_alpha @ translate @ reorient
-        
-        R = M_c2w_gt[:3, :3]
-        T = M_c2w_gt[:3, 3]
-        return R, T
-
+    
     @torch.no_grad()
-    def render(self, mesh_pv: pv.PolyData):
+    def render(
+        self, 
+        mesh_pv: pv.PolyData, 
+        point_clouds: dict[str, torch.Tensor]
+    ) -> tuple[Tensor, Tensor, dict[str, torch.Tensor]]:
         verts = torch.from_numpy(np.array(mesh_pv.points)).float()
         faces_np = np.array(mesh_pv.faces.reshape(-1, 4)[:, 1:])  # skip the first number which is the number of points per face
         faces = torch.from_numpy(faces_np).long()
         mesh = Meshes([verts.to(self.device)], [faces.to(self.device)])
         
-        angles = self.geo.angles
-        silhouette_final = torch.zeros(len(angles), self.height, self.width)
-        depth_final = torch.zeros(len(angles), self.height, self.width)
-        for i, angle in enumerate(angles):
-            R = self.geo.rotation_matrix(angle) @ self.reorient_rot
-            T = self.geo.src_position(angle)
-
-            R = torch.from_numpy(R.squeeze())
-            T = torch.from_numpy(T.squeeze())
-            T = -T      # TODO why need to multiply -1?
-            
-            cameras = FoVPerspectiveCameras(
-                device=self.device,
-                fov=self.fov,
-                R=R[None].to(self.device),  # pytorch3D uses row vector so R_c2w for column vector don't need to be transposed. (v.T @ R_c2w).T = R_c2w.T @ v = R_c2w @ v
-                T=(-R.T @ T)[None].to(self.device), 
-                zfar=self.zfar
-            )
-            
-            rasterizer = MeshRasterizer(
-                cameras=cameras,
-                raster_settings=self.raster_settings
-            )
-            
-            # rasterize
-            fragments = rasterizer(mesh)
-            depth = fragments.zbuf[0, ..., 0]  # depth buffer
-            # silhouette
-            silhouette = (fragments.pix_to_face[..., 0] >= 0).float()
+        angles = self.geo.angles    # (B, )
+        R = torch.from_numpy(self.geo.rotation_matrix(angles)).to(self.reorient_rot)  # (B, 3, 3), R_c2w
+        R = R @ self.reorient_rot
+        T = torch.from_numpy(self.geo.src_position(angles)).to(self.reorient_rot) # (B, 3)
+        T = - torch.einsum("bmn, bn->bm", (R.transpose(-2, -1), T))
         
-            silhouette_final[i] = silhouette.cpu()
-            depth_final[i] = depth.cpu()
+        # pytorch3D uses row vector so R_c2w for column vector don't need to be transposed. (v.T @ R_c2w).T = R_c2w.T @ v = R_c2w @ v
+        cameras = FoVPerspectiveCameras(
+            device=self.device,
+            fov=self.fov,
+            R=R,  
+            T=T, 
+            zfar=self.zfar,
+            znear=self.znear
+        )
+        
+        rasterizer = MeshRasterizer(
+            cameras=cameras,
+            raster_settings=self.raster_settings
+        )
+        
+        # rasterize
+        fragments = rasterizer(mesh.extend(angles.shape[0]))
+        
+        depth = fragments.zbuf[..., 0]
+        silhouette = (fragments.pix_to_face[..., 0] >= 0).float()
 
-        return silhouette_final, depth_final
+        # rotate to match the odl coordinate system
+        depth = depth.rot90(-1, [-2, -1])
+        silhouette = silhouette.rot90(-1, [-2, -1])
+        
+        # normalize depth
+        depth[depth > 0] = (depth[depth > 0] - self.znear) / self.bound
+        depth[depth < 0] = 0
+        
+        res_clouds = {}
+        for key, cloud in point_clouds.items():
+            pts_screen = cameras.transform_points_screen(cloud, image_size=(self.height, self.width))
+            x, y, z = pts_screen.unbind(-1)
+            # normalize
+            x = x / (self.width-1)
+            y = y / (self.height-1)
+
+            # rotate
+            pts_screen = torch.stack([x, z, 1-y], dim=-1)
+            res_clouds[key] = pts_screen
+        
+        return silhouette.cpu(), depth.cpu(), res_clouds
+
+
+def plot_cloud_and_projs(gif_path: Path, cloud: torch.Tensor, projs: torch.Tensor):
+    n_proj, h, w = projs.shape
+    n_proj_, n_points, _ = cloud.shape
+    assert n_proj == n_proj_
+    
+    # ---- 构建 XZ 平面的 StructuredGrid（只做一次）----
+    x = np.linspace(0, 1, w)
+    z = np.linspace(0, 1, h)
+    x, z = np.meshgrid(x, z)
+    y = np.zeros_like(x)
+    
+    grid = pv.StructuredGrid(x, y, z)
+
+    # 初始化标量
+    img0 = projs[0].cpu().numpy()        # 防止上下颠倒
+    grid["value"] = img0.flatten()
+    
+    # ---- 初始化点云 ----
+    poly = pv.PolyData(cloud[0].cpu().numpy())
+    
+    # ---- Plotter ----
+    plotter = pv.Plotter(off_screen=True)
+    plotter.open_gif(gif_path)
+    
+    plotter.add_mesh(
+        grid,
+        scalars="value",
+    )
+    
+    plotter.add_mesh(
+        poly,
+        color="red",
+        point_size=1,
+        render_points_as_spheres=True,
+    )
+    plotter.add_axes_at_origin(labels_off=True)    #type: ignore
+    plotter.show_bounds(    #type: ignore
+        bounds=[0, 1, 0, 1, 0, 1],
+        grid='back',
+        location='outer',
+        all_edges=True,
+    )
+    plotter.show(auto_close=False)
+    
+    # ---- 逐帧更新 ----
+    for i in range(n_proj):
+        # 更新灰度图
+        img = projs[i].cpu().numpy()
+        grid["value"] = img.flatten()
+        
+        # 更新点云
+        poly.points = cloud[i].cpu().numpy()
+        
+        plotter.write_frame()
+        
+    plotter.close()
+
+
+def save_gif(
+    output_path: Path,
+    frames: torch.Tensor | np.ndarray,
+    fps_gif: int = 30,
+    **imshow_kwargs
+) -> None:
+    matplotlib.use("Agg")
+    frames = frames.squeeze()
+    frames_np = frames.cpu().numpy() if isinstance(frames, torch.Tensor) else frames
+
+    h, w = frames_np.shape[1], frames_np.shape[2]
+
+    dpi = 100
+    fig = plt.figure(figsize=(w / dpi, h / dpi), dpi=dpi)
+    ax = plt.axes((0, 0, 1, 1))  # 填满整个 figure
+    ax.axis("off")
+
+    ims = []
+    for i in range(frames_np.shape[0]):
+        im = ax.imshow(frames_np[i], animated=True, **imshow_kwargs)
+        ims.append([im])
+
+    ani = animation.ArtistAnimation(
+        fig,
+        ims,
+        interval=1000 / fps_gif,
+        blit=True,
+        repeat_delay=1000
+    )
+
+    writer = animation.PillowWriter(fps=fps_gif)
+    ani.save(
+        output_path,
+        writer=writer,
+        dpi=dpi,
+        savefig_kwargs={
+            "pad_inches": 0
+        }
+    )
+
+    plt.close(fig)
 
 
 class DataGenerator(nn.Module):
-    def __init__(self, image_size: tuple[int, ...], num_proj: int, proj_size: tuple[int, int], affine: np.ndarray):
+    def __init__(
+        self, 
+        image_size: tuple[int, ...], 
+        num_proj: int, 
+        proj_size: tuple[int, int], 
+        affine: np.ndarray,
+        device: torch.device
+    ):
         super().__init__()
-        self.geo_param = geo_param = Initialization_ConeBeam(
+        self.geo_param = Initialization_ConeBeam(
             image_size=image_size, 
             num_proj=num_proj, 
             start_angle=0,
             proj_size=proj_size,
             affine=affine
         )
+        self.num_proj = num_proj
+        self.device = device
+        self.affine = affine
         
-        self.ct_projector = ConeBeam3DProjector(geo_param)
-        self.renderer = Torch3DLabelRenderer(geo_param)
+        self.ct_projector = Projection_ConeBeam(self.geo_param)
+        self.renderer = Torch3DLabelRenderer(self.geo_param, device)
         
-    def forward(self, data: torch.Tensor, mesh: pv.PolyData) -> dict[str, Tensor]:
-        # Perform projections
-        projs = self.ct_projector.forward_project(data)
-        silhouette, depth = self.renderer.render(mesh)
+    def forward(
+        self, 
+        data: torch.Tensor, 
+        mesh: pv.PolyData, 
+        point_clouds: dict[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        projs = self.ct_projector(data).squeeze()
         
-        return {
-            'projs': projs,
-            'silhouette': silhouette,
-            'depth': depth
+        silhouette, depth, res_clouds = self.renderer.render(mesh, point_clouds)
+        
+        res = {
+            'projs': projs.cpu(),
+            'mask_2d': silhouette.cpu(),
+            'depth': depth.cpu(),
         }
+        
+        for key in res_clouds.keys():
+            assert key not in res
+        
+        res.update(res_clouds)
+        return res
 
 
 def centerize_affine(affine: np.ndarray, voxels_shape: np.ndarray) -> np.ndarray: 
@@ -425,105 +505,134 @@ def centerize_affine(affine: np.ndarray, voxels_shape: np.ndarray) -> np.ndarray
     return new_affine
 
 
-def test():
-    nii_file = "data/nii/Diseased_1_lca.nii.gz"
-    nii_image = nib.loadsave.load(nii_file)
-    assert isinstance(nii_image, nib.nifti1.Nifti1Image)
-    nii_data_np = nii_image.get_fdata()
-    affine = nii_image.affine
-    assert affine is not None
-    affine = centerize_affine(affine, np.array(nii_data_np.shape))
-    
-    nii_data = torch.from_numpy(nii_data_np)
-    
-    proj_size = (512, 512)
-    num_proj = 32
-    
-    data_generator = DataGenerator(
-        image_size=nii_data_np.shape[-3:],
-        num_proj=num_proj,
-        proj_size=proj_size,
-        affine=affine
-    )
-    
-    mesh = get_mesh_in_world(nii_data, device=torch.device("cpu"), affine=affine)
-    
-    res = data_generator(nii_data, mesh)
-    
-    test_dir = Path("temp")
-    test_dir.mkdir(exist_ok=True)
-    
-    projs = res["projs"]
-    vmax = torch.quantile(projs, 0.995)
-    save_gif(test_dir/'projs.gif', projs.transpose(-1, -2), origin="lower", cmap='gray', vmax=vmax)
-    save_deepthmap_gif(test_dir/'depth.gif', res["depth"])
-    save_gif(test_dir/'silhouette.gif', res["silhouette"], cmap='gray')
-    
-    for n, v in res.items():
-        nii_image = nib.nifti1.Nifti1Image(v.numpy().squeeze(), np.eye(4))
-        nib.loadsave.save(nii_image, test_dir/f"{n}.nii.gz")
-    
-    torch.save(res, test_dir/'res.pt')
-    
-    return res
-
-
-def process_single_file(nii_file, num_projs, proj_size, output_dir):
-    case_name = nii_file.stem.split('.')[0]
-    nii_image = nib.loadsave.load(nii_file)
-    assert isinstance(nii_image, nib.nifti1.Nifti1Image)
-    nii_data_np = nii_image.get_fdata()
-    affine = nii_image.affine
-    assert affine is not None
-    affine = centerize_affine(affine, np.array(nii_data_np.shape))
-    
-    nii_data = torch.from_numpy(nii_data_np)[None]
+def process_single_file(
+    nii_file: Path, 
+    num_projs: Iterable[int], 
+    proj_size: tuple[int, int], 
+    output_dir: Path,
+    vis_num_projs: list[int] | None = None
+):
     device = torch.device("cuda")
-    mesh = get_mesh_in_world(nii_data, affine=affine, device=device)
+    case_name = nii_file.stem.split('.')[0]
+    
+    nii_image = nib.loadsave.load(nii_file)
+    assert isinstance(nii_image, nib.nifti1.Nifti1Image)
+    data = torch.from_numpy(nii_image.get_fdata())    # [w, h, d]
+    
+    affine = nii_image.affine
+    assert affine is not None
+    affine = centerize_affine(affine, np.array(data.shape))
+    
+    skeleton_np = skeletonize(data.cpu().numpy())
+    skeleton_tensor = torch.from_numpy(skeleton_np).to(device)
+    point_clouds = {
+        'bg_mask': get_label_clouds_in_world(data, affine=affine).to(device),
+        'cl_mask': get_label_clouds_in_world(skeleton_tensor, affine=affine).to(device)
+    }
+    mesh = get_mesh_in_world(data, affine=affine)
 
+    data = data[None].to(device)
     for n_proj in num_projs:
         data_generator = DataGenerator(
-            image_size=nii_data_np.shape[-3:],
+            image_size=data.shape[-3:],
             num_proj=n_proj,
             proj_size=proj_size,
-            affine=affine
+            affine=affine,
+            device=device
         )
-        res = data_generator(nii_data, mesh)
+        res = data_generator(data, mesh, point_clouds)
         
         sub_dir = output_dir / f"{n_proj:02d}_projs"
         sub_dir.mkdir(exist_ok=True, parents=True)
         
-        res_np = {}
-        for n, v in res.items():
-            res_np[n] = v.cpu().numpy()
+        torch.save(res, sub_dir / f"{case_name}.pt")
         
-        # 保存结果文件路径和内容
-        save_path = sub_dir / f"{case_name}.npz"
-        np.savez_compressed(save_path, **res_np)
-        
-        # 可视化只在 32 投影时保存
-        if n_proj == 32:
-            vis_dir = sub_dir / "vis"
+        if vis_num_projs is not None and n_proj in vis_num_projs:
+            vis_dir = sub_dir / "vis" / f"{case_name}"
             vis_dir.mkdir(exist_ok=True, parents=True)
             projs = res["projs"]
             vmax = torch.quantile(projs, 0.995)
-            save_gif(vis_dir/f'{case_name}_projs.gif', projs.transpose(-1, -2), origin="lower", cmap='gray', vmax=vmax)
-            save_deepthmap_gif(vis_dir/f'{case_name}_depth.gif', res["depth"])
+            plot_cloud_and_projs(
+                vis_dir/'bg_mask_and_projs.gif',
+                res["bg_mask"],
+                projs,
+            )
+            
+            plot_cloud_and_projs(
+                vis_dir/'cl_mask_and_depth.gif',
+                res["cl_mask"],
+                res["depth"],
+            )
+            save_gif(vis_dir/'projs.gif', projs.transpose(-1, -2), origin="lower", cmap='gray', vmax=vmax)
+            save_gif(vis_dir/'depth.gif', res["depth"].transpose(-1, -2), origin="lower", cmap='gray')
+            save_gif(vis_dir/'mask_2d.gif', res["mask_2d"].transpose(-1, -2), origin="lower", cmap='gray')
 
         torch.cuda.empty_cache()
     
-    return res
+    return res  # return the last case for test
 
-if __name__ == '__main__':
-    # input_dir=Path("data/nii")
-    # output_dir=Path("data/nii_projs")
+
+def test_process_single_file():
+    data_dir = Path("data")
+    nii_file = Path("data/nii_size320_spacing0-4/Normal_01_lca.nii.gz")
+    case_name = str(nii_file.relative_to(data_dir)).split('.')[0].replace('/', '_')
+    num_projs = (2, 4, 8, 16, 32)
+    proj_size = (512, 512)
+    output_dir = Path("temp") / case_name
+    output_dir.mkdir(exist_ok=True, parents=True)
+    res = process_single_file(nii_file, num_projs, proj_size, output_dir, vis_num_projs=[32])
     
-    input_dir=Path("data/nii_size320_spacing0-4")
-    output_dir=Path("data/nii_size320_spacing0-4_projs")
+    def save_nii(key: str, value: torch.Tensor):
+        nib.loadsave.save(
+            nib.nifti1.Nifti1Image(value.cpu().numpy(), affine=np.eye(4)),
+            output_dir / f"{key}.nii.gz"
+        )
     
-    proj_size: tuple[int, int] = (512, 512)
-    num_projs: tuple[int, ...] = (2, 4, 8, 16, 32)
-    num_workers: int = 8
+    def point_cloud_to_image(points: torch.Tensor, image_size: tuple[int, int]) -> torch.Tensor:
+        W, H = image_size
+        B, N, _ = points.shape
+        x, y, z = points.unbind(-1)
+        ix = (x * (W - 1)).long().clamp(0, W - 1)
+        iz = (z * (H - 1)).long().clamp(0, H - 1)
+        ib = torch.arange(B).to(ix).view(B, 1).expand(B, N)
+        res = torch.zeros(B, W, H).to(points)
+        res[ib, ix, iz] = y
+        return res
+    
+    clouds_keys = ["bg_mask", "cl_mask"]
+    for k, v in res.items():
+        if k in clouds_keys:
+            save_nii(k, point_cloud_to_image(v, proj_size))
+        else:
+            save_nii(k, v)
+
+
+def main(
+    input_dir: Annotated[Path, typer.Argument(help="Input directory containing .nii.gz files")],
+    output_dir: Annotated[Path, typer.Argument(help="Output directory to save results")],
+    proj_size: Annotated[tuple[int, int], typer.Option(help="Size of projection images")] = (512, 512),
+    num_projs: Annotated[list[int], typer.Option(help="Number of projections to generate")] = [2, 4, 8, 16, 32],
+    num_workers: Annotated[int, typer.Option(help="Number of workers to use")] = 4,
+    vis_num_projs: Annotated[list[int]|None, typer.Option(help="Number of projections to visualize")] = None,
+):
+    """
+    Main function for processing 3D medical images (.nii.gz) to generate 2D projections.
+
+    Processing Pipeline:
+        1. Loads all .nii.gz files from input directory
+        2. For each file:
+            - Loads 3D volume data and generates mesh
+            - Generates multiple 2D projections (specified by num_projs)
+            - Saves projections and derived data (depth maps, masks)
+            - Optionally saves visualizations when num_projs=32
+        3. Uses multiprocessing for parallel processing of files
+    """
+    if vis_num_projs is not None:
+        for vim_proj in vis_num_projs:
+            if vim_proj not in num_projs:
+                raise ValueError(f"{vim_proj} not in {num_projs}")
+    
+    mp.set_start_method("spawn", force=True)
     
     nii_files = list(input_dir.glob("*.nii.gz"))
     if not nii_files:
@@ -534,6 +643,7 @@ if __name__ == '__main__':
         num_projs=num_projs,
         proj_size=proj_size,
         output_dir=output_dir,
+        vis_num_projs=vis_num_projs
     )
     
     print(f"Processing {len(nii_files)} files with {num_workers} workers...")
@@ -545,3 +655,6 @@ if __name__ == '__main__':
             ncols=80,
         ):
             pass
+
+if __name__ == '__main__':
+    typer.run(main)
