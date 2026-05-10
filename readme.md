@@ -115,9 +115,10 @@ python -m sparse_view_dataset project data/asoca_size128_spacing0-7/ ./ori_data/
 ```text
 data/asoca_proj_128/
     32_projs/
-        Diseased_17.pt
+        Diseased_17_lca.pt
+        Diseased_17_rca.pt
         vis/
-            Diseased_17/
+            Diseased_17_lca/
                 projs.gif
                 depth.gif
                 mask_2d.gif
@@ -174,7 +175,7 @@ conda env create -f environment.yaml
 
 ## 6. 开发建议
 
--- 如果你要改裁剪、连通域或 affine 规则，优先看 [sparse_view_dataset/preprocess.py](sparse_view_dataset/preprocess.py) 和 [sparse_view_dataset/affine_transforms.py](sparse_view_dataset/affine_transforms.py)。
+- 如果你要改裁剪、连通域或 affine 规则，优先看 [sparse_view_dataset/preprocess.py](sparse_view_dataset/preprocess.py) 和 [sparse_view_dataset/affine_transforms.py](sparse_view_dataset/affine_transforms.py)。
 - 如果你要改投影几何、mesh 渲染或点云对齐，优先看 [sparse_view_dataset/projection.py](sparse_view_dataset/projection.py)、[sparse_view_dataset/cone_beam.py](sparse_view_dataset/cone_beam.py)、以及 [sparse_view_dataset/torch3d_render.py](sparse_view_dataset/torch3d_render.py)。
 - 如果你要改 mesh 相关实现，优先看 [sparse_view_dataset/mesh_utils.py](sparse_view_dataset/mesh_utils.py)。
 - 如果你要改可视化输出或 GIF 生成，优先看 [sparse_view_dataset/visualize.py](sparse_view_dataset/visualize.py)。

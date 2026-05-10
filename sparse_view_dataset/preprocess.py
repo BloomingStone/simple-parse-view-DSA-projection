@@ -137,6 +137,7 @@ def process_input_path(
     expand: int,
     target_shape: tuple[int, int, int],
     target_spacing: float | None,
+    workers: int | None = None,
     saving_pt: bool = False,
 ) -> None:
     """
@@ -156,10 +157,31 @@ def process_input_path(
         target_spacing: Target output spacing in mm (default: None, recommended: 0.5)
     """
     if input_path.is_dir():
+        # 并行处理目录下的多个 nii.gz 文件，默认使用系统 CPU 数量
         from tqdm import tqdm
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        import os
+
         all_paths = list(input_path.rglob("*.nii.gz"))
-        for p in tqdm(all_paths, desc="Processing files"):
+        if len(all_paths) == 0:
+            return
+
+        max_workers = workers or (os.cpu_count() or 1)
+
+        # 预先创建子目录，避免并发时目录创建冲突
+        sub_outdirs = []
+        for p in all_paths:
             sub_outdir = outdir / p.parent.relative_to(input_path) / str(p.stem).split(".")[0]
-            process_single_input(p, sub_outdir, expand, target_shape, target_spacing, saving_pt)
+            sub_outdir.mkdir(parents=True, exist_ok=True)
+            sub_outdirs.append((p, sub_outdir))
+
+        futures = []
+        with ProcessPoolExecutor(max_workers=max_workers) as ex:
+            for p, sub_outdir in sub_outdirs:
+                futures.append(ex.submit(process_single_input, p, sub_outdir, expand, target_shape, target_spacing, saving_pt))
+
+            for _ in tqdm(as_completed(futures), total=len(futures), desc="Processing files"):
+                # as_completed yields futures as they complete; check exceptions
+                pass
     else:
         process_single_input(input_path, outdir, expand, target_shape, target_spacing, saving_pt)

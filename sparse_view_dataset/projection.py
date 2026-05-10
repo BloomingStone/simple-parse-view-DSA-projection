@@ -3,6 +3,8 @@ from multiprocessing import Pool
 from pathlib import Path
 from typing import Iterable
 import multiprocessing as mp
+import signal
+import traceback
 
 import numpy as np
 import pyvista as pv
@@ -109,7 +111,8 @@ class DataGenerator(nn.Module):
         for key in res_clouds.keys():
             assert key not in res
         
-        res.update(res_clouds)
+        # Keep outputs on CPU to avoid CUDA IPC/sharing issues across processes.
+        res.update({k: v.cpu() for k, v in res_clouds.items()})
         return res
 
 
@@ -120,13 +123,19 @@ def project_one_case(
     proj_size: tuple[int, int],
     output_dir: Path,
     vis_num_projs: Iterable[int] | None = None,
-) -> dict[str, torch.Tensor]:
+) -> None:
     device = torch.device("cuda")
     
     # Find paths
     case_name, branch_type = parse_name_type(resampled_coronary_file)
     ori_coronary_file = original_data_dir / "coronary" / f"{case_name}.nii.gz"
     ori_volume_file = original_data_dir / "volume" / f"{case_name}.nii.gz"
+    if not ori_coronary_file.exists():
+        print(f"Original coronary file not found for case {case_name}, skipping (path: {ori_coronary_file}).")
+        return
+    if not ori_volume_file.exists():
+        print(f"Original volume file not found for case {case_name}, skipping (path: {ori_volume_file}).")
+        return
     
     # read original data
     resampled_cor_data, resample_cor_affine = read_nii_data(resampled_coronary_file)
@@ -163,6 +172,9 @@ def project_one_case(
         'cl_mask': get_label_clouds_in_world(skeleton_tensor, affine=resample_cor_affine_centered).to(device)
     }
     mesh = get_mesh_in_world(resampled_cor_data_tensor, affine=resample_cor_affine_centered)
+    if mesh.n_points == 0 or mesh.n_cells == 0:
+        print(f"Empty mesh for {resampled_coronary_file}, skipping.")
+        return
 
 
     density_tensor = density_tensor[None].to(device)
@@ -181,10 +193,12 @@ def project_one_case(
         sub_dir = output_dir / f"{n_proj:02d}_projs"
         sub_dir.mkdir(exist_ok=True, parents=True)
         
-        torch.save(res, sub_dir / f"{case_name}.pt")
+        res["case_name"] = case_name
+        res["branch_type"] = branch_type
+        torch.save(res, sub_dir / f"{case_name}_{branch_type}.pt")
         
         if vis_num_projs is not None and n_proj in vis_num_projs:
-            vis_dir = sub_dir / "vis" / f"{case_name}"
+            vis_dir = sub_dir / "vis" / f"{case_name}_{branch_type}"
             vis_dir.mkdir(exist_ok=True, parents=True)
             projs = res["projs"]
             plot_cloud_and_projs(
@@ -204,7 +218,36 @@ def project_one_case(
 
         torch.cuda.empty_cache()
     
-    return res  # type: ignore return the last case for test
+    return
+
+
+def _project_one_case_safe(
+    resampled_coronary_file: Path,
+    original_data_dir: Path,
+    num_projs: Iterable[int],
+    proj_size: tuple[int, int],
+    output_dir: Path,
+    vis_num_projs: Iterable[int] | None = None,
+) -> bool:
+    try:
+        project_one_case(
+            resampled_coronary_file=resampled_coronary_file,
+            original_data_dir=original_data_dir,
+            num_projs=num_projs,
+            proj_size=proj_size,
+            output_dir=output_dir,
+            vis_num_projs=vis_num_projs,
+        )
+        return True
+    except Exception as e:
+        print(f"Failed case {resampled_coronary_file}: {e}")
+        print(traceback.format_exc())
+        return False
+
+
+def _pool_worker_init() -> None:
+    # Let the parent process handle Ctrl+C; workers ignore SIGINT.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 
 
@@ -222,13 +265,19 @@ def process_resampled_directory(
             if vis_proj not in num_projs:
                 raise ValueError(f"{vis_proj} not in {num_projs}")
 
-    mp.set_start_method("spawn", force=True)
-    nii_files = list(resample_coronary_dir.rglob("*.nii.gz"))
+    all_nii_files = list(resample_coronary_dir.rglob("*.nii.gz"))
+    nii_files = [
+        p for p in all_nii_files
+        if p.stem.split(".")[0].lower().endswith("_lca") or p.stem.split(".")[0].lower().endswith("_rca")
+    ]
     if not nii_files:
-        raise ValueError(f"No .nii.gz files found in {resample_coronary_dir}")
+        raise ValueError(
+            f"No coronary branch files (*_lca.nii.gz / *_rca.nii.gz) found in {resample_coronary_dir}. "
+            f"Found total .nii.gz files: {len(all_nii_files)}"
+        )
 
     worker = partial(
-        project_one_case,
+        _project_one_case_safe,
         original_data_dir=original_data_dir,
         num_projs=num_projs,
         proj_size=proj_size,
@@ -236,6 +285,25 @@ def process_resampled_directory(
         vis_num_projs=vis_num_projs,
     )
 
-    with Pool(processes=num_workers) as pool:
-        for _ in tqdm(pool.imap_unordered(worker, nii_files), total=len(nii_files), desc="Processing files", ncols=80):
+    ctx = mp.get_context("spawn")
+    pool = ctx.Pool(
+        processes=num_workers,
+        initializer=_pool_worker_init,
+        maxtasksperchild=1,
+    )
+    try:
+        it = pool.imap_unordered(worker, nii_files, chunksize=1)
+        for _ in tqdm(it, total=len(nii_files), desc="Processing files", ncols=80):
             pass
+    except KeyboardInterrupt:
+        print("\nKeyboardInterrupt received, terminating workers...")
+        pool.terminate()
+        pool.join()
+        raise
+    except Exception:
+        pool.terminate()
+        pool.join()
+        raise
+    else:
+        pool.close()
+        pool.join()
