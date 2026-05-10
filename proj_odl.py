@@ -495,6 +495,11 @@ def save_gif(
     else:
         frames_np = frames
 
+    if "vmin" not in imshow_kwargs or "vmax" not in imshow_kwargs:
+        vmin, vmax = np.percentile(frames_np, [0.05, 99.5])
+        imshow_kwargs.setdefault("vmin", vmin)
+        imshow_kwargs.setdefault("vmax", vmax)
+
     h, w = frames_np.shape[1], frames_np.shape[2]
 
     dpi = 100
@@ -780,7 +785,6 @@ def process_single_file(
             vis_dir = sub_dir / "vis" / f"{case_name}"
             vis_dir.mkdir(exist_ok=True, parents=True)
             projs = res["projs"]
-            vmax = torch.quantile(projs, 0.995)
             plot_cloud_and_projs(
                 vis_dir/'bg_mask_and_projs.gif',
                 res["bg_mask"],
@@ -792,7 +796,7 @@ def process_single_file(
                 res["cl_mask"],
                 res["depth"],
             )
-            save_gif(vis_dir/'projs.gif', projs.transpose(-1, -2), origin="lower", cmap='gray', vmax=vmax)
+            save_gif(vis_dir/'projs.gif', projs.transpose(-1, -2), origin="lower", cmap='gray')
             save_gif(vis_dir/'depth.gif', res["depth"].transpose(-1, -2), origin="lower", cmap='gray')
             save_gif(vis_dir/'mask_2d.gif', res["mask_2d"].transpose(-1, -2), origin="lower", cmap='gray')
 
@@ -803,7 +807,7 @@ def process_single_file(
 
 def test_process_single_file():
     data_dir = Path("data")
-    nii_file = Path("data/nii_size128_spacing0-7/Diseased_17/Diseased_17_lca.nii.gz")
+    nii_file = Path("data/asoca_size128_spacing0-7/Diseased_17/Diseased_17_lca.nii.gz")
     case_name = str(nii_file.relative_to(data_dir)).split('.')[0].replace('/', '_')
     proj_size = (512, 512)
     
