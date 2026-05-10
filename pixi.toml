@@ -12,8 +12,7 @@ cuda = "12.0"
 [pypi-options]
 index-url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 
-[activation.env]
-CUDA_VISIBLE_DEVICES = "3"
+
 
 [dependencies]
 pytorch-gpu = "==2.8.0"

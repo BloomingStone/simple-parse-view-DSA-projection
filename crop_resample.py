@@ -106,8 +106,8 @@ def crop_expanded_roi(label: np.ndarray, affine: np.ndarray, iterations: int=5) 
     # label: boolean array
     coords = np.where(label)
     if coords[0].size == 0:
-            # no positive voxels: return full label and zero offset
-            return label.copy(), affine.copy()
+        # no positive voxels: return full label and zero offset
+        return label.copy(), affine.copy()
 
     mins = [int(np.min(c)) for c in coords]
     maxs = [int(np.max(c)) + 1 for c in coords]  # exclusive
@@ -131,6 +131,12 @@ def crop_expanded_roi(label: np.ndarray, affine: np.ndarray, iterations: int=5) 
 def make_affine_spacing_positive(data: np.ndarray, affine: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
     Transform data and affine to make the spacing in affine positive.
+    ATTENTIONE: after flip, the origin (0,0,0) will change, and therefore T in the affine will also change 
+    accordingly to make sure the world coordinates of voxels remain unchanged.
+    e.g. if flip along x axis, the voxel that was originally at (0,0,0) will now be at (W-1,0,0), therefore 
+    the new affine should satisfy: A_new @ [W-1,0,0] + T_new = A_orig @ [0,0,0] + T_orig = T_orig
+    T_new = T_orig - A_new @ [W-1,0,0] = T_orig - (-A_orig[:3,0]) * (W-1)
+    (because A_new and A_orig only differ by the sign of the first column)
     
     Args:
         data: numpy array in voxel space
@@ -143,15 +149,25 @@ def make_affine_spacing_positive(data: np.ndarray, affine: np.ndarray) -> tuple[
     spacing = np.diag(affine)[:3]
     data = data.copy()
     affine = affine.copy()
+    shape = np.array(data.shape, dtype=int)
+    A = affine[:3, :3]
+    T = affine[:3, 3]
     if spacing[0] < 0:
+        A[:, 0] = -A[:, 0]
+        T = T - A[:, 0] * (shape[0] - 1)
         data = np.flip(data, axis=0)
-        affine[:3, 0] = -affine[:3, 0]
     if spacing[1] < 0:
+        A[:, 1] = -A[:, 1]
+        T = T - A[:, 1] * (shape[1] - 1)
         data = np.flip(data, axis=1)
-        affine[:3, 1] = -affine[:3, 1]
     if spacing[2] < 0:
+        A[:, 2] = -A[:, 2]
+        T = T - A[:, 2] * (shape[2] - 1)
         data = np.flip(data, axis=2)
-        affine[:3, 2] = -affine[:3, 2]
+    
+    affine[:3, :3] = A
+    affine[:3, 3] = T
+        
     return data, affine
 
 
@@ -225,12 +241,20 @@ def resample_to_shape_and_spacing(
         resampled_array = np.array(resampled_array)
     resampled = np.pad(resampled_array, pad_width_tuple, mode='constant', constant_values=0)
     
-    # Adjust affine matrix
-    scale_diag = np.ones(4)
-    scale_diag[:3] = 1 / scale_factors
+    # Adjust affine matrix for the zoom (linear part)
+    scale_diag = np.ones(4, dtype=float)
+    scale_diag[:3] = 1.0 / scale_factors
     new_affine = affine @ np.diag(scale_diag)
-    
+
+    # Compensate for padding at the beginning of each axis: vox_index_padded = vox_index_original + pad_before
+    # therefore world_coord = A_new @ (vox_idx_padded - pad_before) + T_new = (A_new @ vox_idx_padded) + (T_new - A_new @ pad_before)
+    pad_before_vec = np.array([pad_before[0], pad_before[1], pad_before[2]], dtype=float)
+    new_affine[:3, 3] = new_affine[:3, 3] - (new_affine[:3, :3] @ pad_before_vec)
+
     return resampled, new_affine
+
+import numpy as np
+
 
 def crop_roi_and_resample(
     input_file: Path,
@@ -242,18 +266,17 @@ def crop_roi_and_resample(
 ):
     assert input_file.exists(), f"Input file not found: {input_file}"
 
-    data, affine = load_nifti(input_file)
-    branches = separate_coronary(data)
+    ori_data, ori_affine = load_nifti(input_file)
+    branches = separate_coronary(ori_data)
     
     for branch_type, branch_label in branches.items():
-        print(f"{branch_type}: {branch_label.shape}")
+        print(f"{input_file.stem} - {branch_type}: {branch_label.shape}")
 
         # Compute axis-aligned cuboid ROI and expand bounds by given iterations
-        label, affine = crop_expanded_roi(branch_label, affine, iterations=expand)
+        label, affine = crop_expanded_roi(branch_label, ori_affine, iterations=expand)
         label, affine = make_affine_spacing_positive(label, affine)
 
         # Resample the cropped ROI to target shape (nearest to preserve binary)
-        # label_resampled, affine_resampled = resample_to_shape_and_spacing(label_cropped, affine_cropped, target_shape, target_spacing)
         if target_spacing is None:
             label_resampled, affine_resampled = resample_to_shape(label, affine, target_shape)
         else:
@@ -294,7 +317,7 @@ def main(
 
     if input_path.is_dir():
         for p in input_path.rglob("*.nii.gz"):
-            sub_outdir = outdir / p.parent.relative_to(input_path)
+            sub_outdir = outdir / p.parent.relative_to(input_path) / str(p.stem).split('.')[0]
             crop_roi_and_resample(p, sub_outdir, expand, target_shape, target_spacing, saving_pt)
     else:
         crop_roi_and_resample(input_path, outdir, expand, target_shape, target_spacing, saving_pt)
