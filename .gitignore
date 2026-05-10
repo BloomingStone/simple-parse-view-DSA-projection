@@ -224,3 +224,6 @@ Thumbs.db
 # Pixi (package manager)
 .venv/
 pixi-env/
+
+data
+ori_data
