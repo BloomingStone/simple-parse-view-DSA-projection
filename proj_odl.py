@@ -422,7 +422,11 @@ class Torch3DLabelRenderer:
 
         return silhouette.cpu(), depth.cpu(), res_clouds
 
-def plot_cloud_and_projs(gif_path: Path, cloud: torch.Tensor, projs: torch.Tensor):
+def plot_cloud_and_projs(
+    gif_path: Path, 
+    cloud: torch.Tensor, 
+    projs: torch.Tensor,
+) -> None:
     n_proj, h, w = projs.shape
     n_proj_, n_points, _ = cloud.shape
     assert n_proj == n_proj_
@@ -431,7 +435,7 @@ def plot_cloud_and_projs(gif_path: Path, cloud: torch.Tensor, projs: torch.Tenso
     x = np.linspace(0, 1, w)
     z = np.linspace(0, 1, h)
     x, z = np.meshgrid(x, z)
-    y = np.zeros_like(x)
+    y = np.ones_like(x)
     
     grid = pv.StructuredGrid(x, y, z)
 
@@ -464,7 +468,7 @@ def plot_cloud_and_projs(gif_path: Path, cloud: torch.Tensor, projs: torch.Tenso
         all_edges=True,
     )
     plotter.camera_position = 'xz'
-    plotter.camera.azimuth = 180 - 20
+    plotter.camera.azimuth = - 20
     plotter.camera.elevation = 10
     plotter.show(auto_close=False)
     
