@@ -161,6 +161,7 @@ def process_input_path(
         from tqdm import tqdm
         from concurrent.futures import ProcessPoolExecutor, as_completed
         import os
+        import traceback
 
         all_paths = list(input_path.rglob("*.nii.gz"))
         if len(all_paths) == 0:
@@ -175,13 +176,45 @@ def process_input_path(
             sub_outdir.mkdir(parents=True, exist_ok=True)
             sub_outdirs.append((p, sub_outdir))
 
-        futures = []
+        future_to_path = {}
         with ProcessPoolExecutor(max_workers=max_workers) as ex:
             for p, sub_outdir in sub_outdirs:
-                futures.append(ex.submit(process_single_input, p, sub_outdir, expand, target_shape, target_spacing, saving_pt))
+                fut = ex.submit(process_single_input, p, sub_outdir, expand, target_shape, target_spacing, saving_pt)
+                future_to_path[fut] = p
 
-            for _ in tqdm(as_completed(futures), total=len(futures), desc="Processing files"):
-                # as_completed yields futures as they complete; check exceptions
-                pass
+            for fut in tqdm(as_completed(future_to_path), total=len(future_to_path), desc="Processing files"):
+                try:
+                    fut.result()
+                except Exception:
+                    p = future_to_path.get(fut)
+                    tb = traceback.format_exc()
+                    # 打印到 stderr，便于 console 查看
+                    print(f"Error processing {p}:\n{tb}", flush=True)
+                    # 追加写入 outdir 的失败日志
+                    try:
+                        log_path = outdir / "failed_cases.log"
+                        with open(log_path, "a", encoding="utf-8") as f:
+                            f.write(f"==== {p} ====?\n")
+                            f.write(tb)
+                            f.write("\n")
+                    except Exception:
+                        # 如果写日志也失败，至少继续处理其它文件
+                        print(f"Failed to write failed_cases.log for {p}", flush=True)
     else:
-        process_single_input(input_path, outdir, expand, target_shape, target_spacing, saving_pt)
+        # 单文件顺序处理时也捕获异常并记录
+        import traceback
+
+        try:
+            process_single_input(input_path, outdir, expand, target_shape, target_spacing, saving_pt)
+        except Exception:
+            tb = traceback.format_exc()
+            print(f"Error processing {input_path}:\n{tb}", flush=True)
+            try:
+                log_path = outdir / "failed_cases.log"
+                outdir.mkdir(parents=True, exist_ok=True)
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"==== {input_path} ====?\n")
+                    f.write(tb)
+                    f.write("\n")
+            except Exception:
+                print(f"Failed to write failed_cases.log for {input_path}", flush=True)

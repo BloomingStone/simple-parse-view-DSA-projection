@@ -1,7 +1,7 @@
 [workspace]
 authors = ["shi_jie <1592277253@qq.com>"]
 channels = ["astra-toolbox", "conda-forge"]
-name = "simple-DSA-proj"
+name = "sparse_view_dataset"
 platforms = ["linux-64"]
 version = "0.1.0"
 
@@ -28,5 +28,6 @@ astra-toolbox = ">=2.4.0,<3"
 
 
 [pypi-dependencies]
+sparse_view_dataset = { path = ".", editable = true }
 pyvista = { version = ">=0.46.3, <0.47", extras = ["all"] }
 

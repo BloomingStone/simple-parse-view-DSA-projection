@@ -228,7 +228,7 @@ def _project_one_case_safe(
     proj_size: tuple[int, int],
     output_dir: Path,
     vis_num_projs: Iterable[int] | None = None,
-) -> bool:
+) -> tuple[bool, Path, str]:
     try:
         project_one_case(
             resampled_coronary_file=resampled_coronary_file,
@@ -238,11 +238,23 @@ def _project_one_case_safe(
             output_dir=output_dir,
             vis_num_projs=vis_num_projs,
         )
-        return True
-    except Exception as e:
-        print(f"Failed case {resampled_coronary_file}: {e}")
-        print(traceback.format_exc())
-        return False
+        return True, resampled_coronary_file, ""
+    except Exception:
+        return False, resampled_coronary_file, traceback.format_exc()
+
+
+def _append_failed_case_log(output_dir: Path, case_path: Path, tb: str) -> None:
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        log_path = output_dir / "failed_cases.log"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"==== {case_path} ====\n")
+            f.write(tb)
+            if not tb.endswith("\n"):
+                f.write("\n")
+            f.write("\n")
+    except Exception:
+        print(f"Failed to write failed_cases.log for {case_path}", flush=True)
 
 
 def _pool_worker_init() -> None:
@@ -293,8 +305,11 @@ def process_resampled_directory(
     )
     try:
         it = pool.imap_unordered(worker, nii_files, chunksize=1)
-        for _ in tqdm(it, total=len(nii_files), desc="Processing files", ncols=80):
-            pass
+        for succeeded, case_path, tb in tqdm(it, total=len(nii_files), desc="Processing files", ncols=80):
+            if not succeeded:
+                print(f"Failed case {case_path}", flush=True)
+                print(tb, flush=True)
+                _append_failed_case_log(output_dir, case_path, tb)
     except KeyboardInterrupt:
         print("\nKeyboardInterrupt received, terminating workers...")
         pool.terminate()

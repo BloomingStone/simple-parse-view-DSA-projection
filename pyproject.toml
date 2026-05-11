@@ -1,0 +1,27 @@
+
+[build-system]
+requires = ["setuptools>=80.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sparse_view_dataset"
+version = "0.0.0"
+description = "sparse view dataset for 3DGR"
+readme = "readme.md"
+license = "MIT"
+authors = [ { name = "shi_jie", email = "1592277253@qq.com" } ]
+dependencies = []
+
+[project.scripts]
+# Console entry point stub. Implement generate_pyproject.main in your package to generate
+# a pyproject.toml by scanning the current directory.
+gen-pyproject = "generate_pyproject:main"
+
+[tool.generate-pyproject]
+# Configuration for a generator that scans the current directory and writes pyproject.toml.
+# This is a declarative placeholder; you need to provide an implementation.
+include = ["src", "*.py", "*.md"]
+exclude = ["venv", "build", "dist"]
+
+[tool.setuptools]
+packages = ["sparse_view_dataset"]
