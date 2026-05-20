@@ -94,16 +94,26 @@ class DataGenerator(nn.Module):
         
     def forward(
         self, 
-        data: torch.Tensor, 
+        data: torch.Tensor,
+        label: torch.Tensor,
         mesh: pv.PolyData, 
         point_clouds: dict[str, torch.Tensor]
     ) -> dict[str, torch.Tensor]:
-        projs = 1 - self.ct_projector(data).squeeze()
+        projs = self.ct_projector(data).squeeze()
+        
+        # reverse and normalize projections to [0, 1]
+        projs = projs.max() - projs
+        projs = projs / projs.max()
+        
+        label_projs = self.ct_projector(label).squeeze()
+        label_projs = label_projs - label_projs.min()
+        label_projs = label_projs / label_projs.max()
         
         silhouette, depth, res_clouds = self.renderer.render(mesh, point_clouds)
         
         res = {
             'projs': projs.cpu(),
+            'label_projs': label_projs.cpu(),
             'mask_2d': silhouette.cpu(),
             'depth': depth.cpu(),
         }
@@ -137,8 +147,12 @@ def project_one_case(
         print(f"Original volume file not found for case {case_name}, skipping (path: {ori_volume_file}).")
         return
     
-    # read original data
+    # read resampled coronary data: 用于提供roi信息
+    # 目前计算骨架和点云时都使用 resampled_cor_affine_centered 来进行坐标变换，以保证和渲染器的坐标系一致
+    # 此处理流程继承自之前版本的实现，后续可以考虑使用 ori_cor_data 进行处理，效果理论上一样。
     resampled_cor_data, resample_cor_affine = read_nii_data(resampled_coronary_file)
+    
+    # read original data
     ori_cor_data, ori_affine = read_nii_data(ori_coronary_file)
     ori_vol_data, ori_affine_ = read_nii_data(ori_volume_file)
     assert np.allclose(ori_affine, ori_affine_), f"Affine of coronary and volume do not match for case {case_name}"
@@ -178,6 +192,7 @@ def project_one_case(
 
 
     density_tensor = density_tensor[None].to(device)
+    branch_tensor = torch.from_numpy(branch_data).to(device)[None]
     for n_proj in num_projs:
         data_generator = DataGenerator(
             ori_image_size=density_tensor.shape[-3:],
@@ -188,7 +203,7 @@ def project_one_case(
             proj_size=proj_size,
             device=device
         )
-        res = data_generator(density_tensor, mesh, point_clouds)
+        res = data_generator(density_tensor, branch_tensor, mesh, point_clouds)
         
         sub_dir = output_dir / f"{n_proj:02d}_projs"
         sub_dir.mkdir(exist_ok=True, parents=True)
@@ -213,6 +228,7 @@ def project_one_case(
                 res["depth"],
             )
             save_gif(vis_dir/'projs.gif', projs.transpose(-1, -2), origin="lower", cmap='gray')
+            save_gif(vis_dir/'label_projs.gif', res["label_projs"].transpose(-1, -2), origin="lower", cmap='gray')
             save_gif(vis_dir/'depth.gif', res["depth"].transpose(-1, -2), origin="lower", cmap='gray')
             save_gif(vis_dir/'mask_2d.gif', res["mask_2d"].transpose(-1, -2), origin="lower", cmap='gray')
 
