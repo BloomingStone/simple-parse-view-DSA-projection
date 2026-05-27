@@ -195,3 +195,9 @@ python main.py crop ./ori_data/asoca/coronary/ data/asoca_size128_spacing0-7 --t
 ```bash
 python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 --proj-size 128 128 --vis-num-projs 32
 ```
+
+## 8. test
+
+可以在这里下载 [test_data](https://drive.google.com/drive/folders/1Gt5i_6Yvr-s1T9pTs_or9qTj4VUfyJ2L?usp=sharing)
+
+tests/test_conebeam_proj.py 中包含了一个 cone-beam 投影的单元测试，可以参考测试用例使用 cone-beam 投影算子

@@ -192,7 +192,7 @@ def project_one_case(
 
 
     density_tensor = density_tensor[None].to(device)
-    branch_tensor = torch.from_numpy(branch_data).to(device)[None]
+    branch_tensor = torch.from_numpy(branch_data.copy()).to(device)[None]
     for n_proj in num_projs:
         data_generator = DataGenerator(
             ori_image_size=density_tensor.shape[-3:],
