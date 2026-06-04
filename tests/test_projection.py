@@ -1,6 +1,17 @@
 from pathlib import Path
 
-from sparse_view_dataset.projection import _append_failed_case_log, _project_one_case_safe
+import pytest
+
+from sparse_view_dataset.projection import _append_failed_case_log, _build_device_schedule, _project_one_case_safe
+
+
+def test_build_device_schedule_repeats_each_device_evenly():
+    assert _build_device_schedule(4, [0, 1]) == [0, 0, 1, 1]
+
+
+def test_build_device_schedule_rejects_too_few_workers():
+    with pytest.raises(ValueError, match="num_workers=1 is too small for 2 devices"):
+        _build_device_schedule(1, [0, 1])
 
 
 def test_append_failed_case_log_creates_and_appends(tmp_path: Path):

@@ -103,6 +103,25 @@ class ConeBeamParams:
     
     def get_projection(self) -> "ProjectionConeBeam":
         return ProjectionConeBeam(self)
+    
+    def to_dict(self) -> dict:
+        return {
+            "affine": self.affine.tolist(),
+            "nVoxels": self.nVoxels.tolist(),
+            "sVoxels": self.sVoxels.tolist(),
+            "min_pt_world": self.min_pt_world.tolist(),
+            "max_pt_world": self.max_pt_world.tolist(),
+            "nh": self.nh,
+            "nw": self.nw,
+            "sh": self.sh,
+            "sw": self.sw,
+            "dde": self.dde,
+            "dso": self.dso,
+            "num_proj": self.num_proj,
+            "start_angle": self.start_angle,
+            "end_angle": self.end_angle,
+            "proj_range": self.proj_range,
+        }
 
 
 class ProjectionConeBeam(nn.Module):
@@ -114,3 +133,12 @@ class ProjectionConeBeam(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         return self.trafo(x)
+
+    def to_dict(self) -> dict:
+        angles = self.geometry.angles
+        return {
+            "param": self.param.to_dict(),
+            "alphas": np.asanyarray(angles).tolist(),
+            "R": np.asanyarray(self.geometry.rotation_matrix(angles)).tolist(),
+            "T": np.asanyarray(self.geometry.src_position(angles)).tolist(),
+        }

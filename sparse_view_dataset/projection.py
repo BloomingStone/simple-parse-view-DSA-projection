@@ -1,5 +1,4 @@
 from functools import partial
-from multiprocessing import Pool
 from pathlib import Path
 from typing import Iterable
 import multiprocessing as mp
@@ -16,11 +15,13 @@ from tqdm import tqdm
 from .constants import MU_IDODINE, MU_WATER
 from .affine_transforms import centerize_affine, centerize_ori_affine, make_affine_spacing_positive
 from .io import read_nii_data
-from .preprocess import separate_coronary
 from .cone_beam import ConeBeamParams
 from .torch3d_render import Torch3DLabelRenderer
 from .visualize import plot_cloud_and_projs, save_gif
 from .mesh_utils import get_mesh_in_world, get_label_clouds_in_world
+
+
+_WORKER_DEVICE: torch.device | None = None
 
 
 def density_simulation(ori_volume: np.ndarray, coronary_mask: np.ndarray) -> np.ndarray:
@@ -29,8 +30,14 @@ def density_simulation(ori_volume: np.ndarray, coronary_mask: np.ndarray) -> np.
     coronary_mask = coronary_mask.astype(np.bool_)
     res[(ori_volume > 0) & (ori_volume < 600)] = MU_WATER
     res[coronary_mask] = MU_IDODINE
-    res[ori_volume < -2000] = 0
+    res[ori_volume < -1000] = 0
     return res
+
+def Hu_to_mu(hu_volume: np.ndarray) -> np.ndarray:
+    invalid_mask = (hu_volume < -1000)  # anything below -1000 HU is considered invalid and set to 0 attenuation
+    mu = hu_volume / 1000.0 * MU_WATER + MU_WATER
+    mu[invalid_mask] = 0
+    return mu
 
 
 def parse_name_type(file_path: Path) -> tuple[str, str]:
@@ -41,6 +48,27 @@ def parse_name_type(file_path: Path) -> tuple[str, str]:
     if stem.endswith("_rca"):
         return case_name, "rca"
     raise ValueError(f"Cannot infer branch type from file name: {file_path}")
+
+
+def _build_device_schedule(num_workers: int, devices: Iterable[int]) -> list[int]:
+    devices = [int(device_id) for device_id in devices]
+    if not devices:
+        raise ValueError("devices must contain at least one CUDA device id")
+
+    workers_per_device = num_workers // len(devices)
+    if workers_per_device < 1:
+        raise ValueError(
+            f"num_workers={num_workers} is too small for {len(devices)} devices; "
+            f"need at least {len(devices)} workers"
+        )
+
+    return [device_id for device_id in devices for _ in range(workers_per_device)]
+
+
+def _get_worker_device() -> torch.device:
+    if _WORKER_DEVICE is None:
+        return torch.device("cuda")
+    return _WORKER_DEVICE
 
 
 def get_mesh_and_clouds(resampled_cor_data: np.ndarray, resample_cor_affine: np.ndarray) -> tuple[pv.PolyData, dict[str, torch.Tensor]]:
@@ -55,77 +83,6 @@ def get_mesh_and_clouds(resampled_cor_data: np.ndarray, resample_cor_affine: np.
     return mesh, point_clouds
 
 
-class DataGenerator(nn.Module):
-    def __init__(
-        self, 
-        ori_image_size: tuple[int, ...], 
-        ori_affine: np.ndarray,
-        resampled_cor_size: tuple[int, ...],
-        resampled_cor_affine: np.ndarray,
-        num_proj: int, 
-        proj_size: tuple[int, int], 
-        device: torch.device,
-        start_angle: float = 0,
-    ):
-        super().__init__()
-        self.ori_geo_param = ConeBeamParams.init_from(
-            volume_size=ori_image_size,
-            affine=ori_affine,
-            num_proj=num_proj,
-            start_angle=start_angle,
-            proj_size=proj_size,
-        )
-        self.resampled_cor_geo_param = ConeBeamParams.init_from(
-            volume_size=resampled_cor_size,
-            affine=resampled_cor_affine,
-            num_proj=num_proj,
-            start_angle=start_angle,
-            proj_size=proj_size,
-        )
-        self.num_proj = num_proj
-        self.device = device
-        self.affine = ori_affine
-        
-        self.ct_projector = self.ori_geo_param.get_projection()
-        self.renderer = Torch3DLabelRenderer(
-            self.resampled_cor_geo_param.get_projection(), 
-            device
-        )
-        
-    def forward(
-        self, 
-        data: torch.Tensor,
-        label: torch.Tensor,
-        mesh: pv.PolyData, 
-        point_clouds: dict[str, torch.Tensor]
-    ) -> dict[str, torch.Tensor]:
-        projs = self.ct_projector(data).squeeze()
-        
-        # reverse and normalize projections to [0, 1]
-        projs = projs.max() - projs
-        projs = projs / projs.max()
-        
-        label_projs = self.ct_projector(label).squeeze()
-        label_projs = label_projs - label_projs.min()
-        label_projs = label_projs / label_projs.max()
-        
-        silhouette, depth, res_clouds = self.renderer.render(mesh, point_clouds)
-        
-        res = {
-            'projs': projs.cpu(),
-            'label_projs': label_projs.cpu(),
-            'mask_2d': silhouette.cpu(),
-            'depth': depth.cpu(),
-        }
-        
-        for key in res_clouds.keys():
-            assert key not in res
-        
-        # Keep outputs on CPU to avoid CUDA IPC/sharing issues across processes.
-        res.update({k: v.cpu() for k, v in res_clouds.items()})
-        return res
-
-
 def project_one_case(
     resampled_coronary_file: Path,
     original_data_dir: Path,
@@ -133,8 +90,10 @@ def project_one_case(
     proj_size: tuple[int, int],
     output_dir: Path,
     vis_num_projs: Iterable[int] | None = None,
+    device: torch.device | None = None,
+    start_angle: float = 0,
 ) -> None:
-    device = torch.device("cuda")
+    device = device or _get_worker_device()
     
     # Find paths
     case_name, branch_type = parse_name_type(resampled_coronary_file)
@@ -153,33 +112,26 @@ def project_one_case(
     resampled_cor_data, resample_cor_affine = read_nii_data(resampled_coronary_file)
     
     # read original data
-    ori_cor_data, ori_affine = read_nii_data(ori_coronary_file)
-    ori_vol_data, ori_affine_ = read_nii_data(ori_volume_file)
-    assert np.allclose(ori_affine, ori_affine_), f"Affine of coronary and volume do not match for case {case_name}"
-    
-    # separate coronary branches and select the branch of interest
-    ori_cor_branches = separate_coronary(ori_cor_data)
-    if branch_type not in ori_cor_branches:
-        raise ValueError(f"Branch type {branch_type} not found in {ori_coronary_file}")
-    branch_data = ori_cor_branches[branch_type]
+    ori_vol_data, ori_affine = read_nii_data(ori_volume_file)
     
     # ODL need positive spacing, so make affine spacing positive and adjust the data accordingly
-    ori_cor_data, ori_affine_positive = make_affine_spacing_positive(ori_cor_data, ori_affine)
-    ori_vol_data, _ = make_affine_spacing_positive(ori_vol_data, ori_affine)
-    branch_data, _ = make_affine_spacing_positive(branch_data, ori_affine)
+    ori_vol_data, ori_affine_positive = make_affine_spacing_positive(ori_vol_data, ori_affine)
+    
+    # \mu = \mu_w ( 1 + HU/1000 )
+    # \int \mu dl = \int \mu_w ( 1 + HU/1000 ) dl = \int \mu_w dl + \int \mu_w HU/1000 dl  = \mu_w L + \mu_w / 1000 \int HU dl
+    # \mu_w L is a constant offset that depends on the total length of the ray in the volume, and does not affect the relative contrast.
+    # Therefore, Hu is not suitable for projection and rendering, convert to linear attenuation coefficient (mu) using a simple water-based model
+    ori_vol_data = Hu_to_mu(ori_vol_data)
     
     # 将重采样图像的 affine 中心化，使得重采样label的中心点在世界坐标系中的位置为 (0, 0, 0)
     # 同时将 原始分辨率图像对齐到中心化后的重采样图像
     resample_cor_affine_centered = centerize_affine(resample_cor_affine, np.array(resampled_cor_data.shape))
     ori_affine_centralized = centerize_ori_affine(ori_affine_positive, resampled_cor_data.shape, resample_cor_affine)
-
-    # Make coronary branch density as iodine contrast, and background density as water, to better simulate the projection image.
-    density = density_simulation(ori_vol_data, branch_data)
     
     skeleton_np = skeletonize(resampled_cor_data)
-    
-    density_tensor = torch.from_numpy(density).to(device)
-    resampled_cor_data_tensor = torch.from_numpy(resampled_cor_data).to(device)
+
+    ori_vol_data_tensor = torch.from_numpy(ori_vol_data.copy())[None].to(device)
+    resampled_cor_data_tensor = torch.from_numpy(resampled_cor_data.copy())[None].to(device)
     skeleton_tensor = torch.from_numpy(skeleton_np).to(device)
     point_clouds = {
         'bg_mask': get_label_clouds_in_world(resampled_cor_data_tensor, affine=resample_cor_affine_centered).to(device),
@@ -190,20 +142,47 @@ def project_one_case(
         print(f"Empty mesh for {resampled_coronary_file}, skipping.")
         return
 
-
-    density_tensor = density_tensor[None].to(device)
-    branch_tensor = torch.from_numpy(branch_data).to(device)[None]
     for n_proj in num_projs:
-        data_generator = DataGenerator(
-            ori_image_size=density_tensor.shape[-3:],
-            ori_affine=ori_affine_centralized,
-            resampled_cor_size=resampled_cor_data.shape[-3:],
-            resampled_cor_affine=resample_cor_affine_centered,
+        ori_geo_param = ConeBeamParams.init_from(
+            volume_size=ori_vol_data.shape,
+            affine=ori_affine_centralized,
             num_proj=n_proj,
+            start_angle=start_angle,
             proj_size=proj_size,
-            device=device
         )
-        res = data_generator(density_tensor, branch_tensor, mesh, point_clouds)
+        resampled_cor_geo_param = ConeBeamParams.init_from(
+            volume_size=resampled_cor_data.shape,
+            affine=resample_cor_affine_centered,
+            num_proj=n_proj,
+            start_angle=start_angle,
+            proj_size=proj_size,
+        )
+        original_ct_projector = ori_geo_param.get_projection()
+        resampled_cor_ct_projector = resampled_cor_geo_param.get_projection()
+        mesh_renderer = Torch3DLabelRenderer(resampled_cor_ct_projector, device)
+        
+        ori_projs = original_ct_projector(ori_vol_data_tensor).squeeze()
+        label_projs = resampled_cor_ct_projector(resampled_cor_data_tensor).squeeze()
+        
+        xca_raw = torch.exp( - (ori_projs + label_projs * MU_IDODINE) )
+        xca_vis = torch.pow(xca_raw, 0.1)  # gamma correction for better visualization
+        
+        silhouette, depth, res_clouds = mesh_renderer.render(mesh, point_clouds)
+        
+        res = {
+            "projs": xca_vis.cpu(),
+            "ori_projs": ori_projs.cpu(),
+            "label_projs": label_projs.cpu(),
+            "mask_2d": silhouette.cpu(),
+            "depth": depth.cpu(),
+            "ori_projs_meta": original_ct_projector.to_dict(),
+            "label_projs_meta": resampled_cor_ct_projector.to_dict(),
+        }
+        
+        for key in res_clouds.keys():
+            assert key not in res
+        
+        res.update({k: v.cpu() for k, v in res_clouds.items()})
         
         sub_dir = output_dir / f"{n_proj:02d}_projs"
         sub_dir.mkdir(exist_ok=True, parents=True)
@@ -215,11 +194,11 @@ def project_one_case(
         if vis_num_projs is not None and n_proj in vis_num_projs:
             vis_dir = sub_dir / "vis" / f"{case_name}_{branch_type}"
             vis_dir.mkdir(exist_ok=True, parents=True)
-            projs = res["projs"]
+            ori_projs = res["ori_projs"]
             plot_cloud_and_projs(
                 vis_dir/'bg_mask_and_projs.gif',
                 res["bg_mask"],
-                projs,
+                ori_projs,
             )
             
             plot_cloud_and_projs(
@@ -227,7 +206,7 @@ def project_one_case(
                 res["cl_mask"],
                 res["depth"],
             )
-            save_gif(vis_dir/'projs.gif', projs.transpose(-1, -2), origin="lower", cmap='gray')
+            save_gif(vis_dir/'ori_projs.gif', ori_projs.transpose(-1, -2), origin="lower", cmap='gray')
             save_gif(vis_dir/'label_projs.gif', res["label_projs"].transpose(-1, -2), origin="lower", cmap='gray')
             save_gif(vis_dir/'depth.gif', res["depth"].transpose(-1, -2), origin="lower", cmap='gray')
             save_gif(vis_dir/'mask_2d.gif', res["mask_2d"].transpose(-1, -2), origin="lower", cmap='gray')
@@ -244,6 +223,7 @@ def _project_one_case_safe(
     proj_size: tuple[int, int],
     output_dir: Path,
     vis_num_projs: Iterable[int] | None = None,
+    device: torch.device | None = None,
 ) -> tuple[bool, Path, str]:
     try:
         project_one_case(
@@ -253,6 +233,7 @@ def _project_one_case_safe(
             proj_size=proj_size,
             output_dir=output_dir,
             vis_num_projs=vis_num_projs,
+            device=device,
         )
         return True, resampled_coronary_file, ""
     except Exception:
@@ -273,9 +254,23 @@ def _append_failed_case_log(output_dir: Path, case_path: Path, tb: str) -> None:
         print(f"Failed to write failed_cases.log for {case_path}", flush=True)
 
 
-def _pool_worker_init() -> None:
+def _pool_worker_init(device_schedule: list[int]) -> None:
     # Let the parent process handle Ctrl+C; workers ignore SIGINT.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available but a GPU device list was provided")
+
+    proc = mp.current_process()
+    worker_index = proc._identity[0] - 1 if proc._identity else 0
+    device_id = device_schedule[worker_index % len(device_schedule)]
+    torch.cuda.set_device(device_id)
+    
+    import astra
+    astra.set_gpu_index(device_id)
+
+    global _WORKER_DEVICE
+    _WORKER_DEVICE = torch.device(f"cuda:{device_id}")
 
 
 
@@ -286,6 +281,7 @@ def process_resampled_directory(
     proj_size: tuple[int, int] = (512, 512),
     num_projs: list[int] | tuple[int, ...] = (32,),
     num_workers: int = 4,
+    devices: list[int] | tuple[int, ...] = (0,),
     vis_num_projs: list[int] | None = None,
 ) -> None:
     if vis_num_projs is not None:
@@ -304,6 +300,8 @@ def process_resampled_directory(
             f"Found total .nii.gz files: {len(all_nii_files)}"
         )
 
+    device_schedule = _build_device_schedule(num_workers, devices)
+
     worker = partial(
         _project_one_case_safe,
         original_data_dir=original_data_dir,
@@ -315,8 +313,9 @@ def process_resampled_directory(
 
     ctx = mp.get_context("spawn")
     pool = ctx.Pool(
-        processes=num_workers,
+        processes=len(device_schedule),
         initializer=_pool_worker_init,
+        initargs=(device_schedule,),
         maxtasksperchild=1,
     )
     try:

@@ -19,6 +19,8 @@
 
 ## 1. crop 子命令
 
+- [ ] TODO **现在 `crop` 处理尺寸存在问题 比如即使设定了 `target-shape`，输出的 shape 仍然可能不完全等于目标值，可能是因为 spacing 的优先级更高。有一些长度超过 target shape 的边不会进行处理**
+
 `crop` 的职责只有一个：把原始冠脉标签整理成统一尺寸、统一 spacing、统一方向的局部 ROI。核心逻辑都在包内以下模块中：
 
 - `[sparse_view_dataset/preprocess.py](sparse_view_dataset/preprocess.py)`：冠脉分离、ROI 计算、裁剪与重采样的主流程。
@@ -128,7 +130,8 @@ data/asoca_proj_128/
 
 `.pt` 文件中包含以下键：
 
-- `projs`：ODL 生成的 DRR 投影，shape 为 `(num_projs, H, W)`。
+- `projs`：ODL 生成的 DRR 投影（取负值后归一化，从密度投影近似转换为X射线强度，数值越低表示X射线强度低，对应密度越大），shape 为 `(num_projs, H, W)`。
+- `label_projs`：冠脉标签的密度投影（已归一化），shape 为 `(num_projs, H, W)`
 - `mask_2d`：mesh 投影得到的二维二值轮廓，shape 为 `(num_projs, H, W)`。
 - `depth`：mesh 投影得到的深度图，shape 为 `(num_projs, H, W)`, 值为 mesh 表面到相机的距离。
 - `bg_mask`：冠脉前景体素点云，shape 为 `(num_projs, N, 3)`。
@@ -191,7 +194,12 @@ python main.py crop ./ori_data/asoca/coronary/ data/asoca_size128_spacing0-7 --t
 ```
 
 生成投影：
+- `--num-projs` 为投影数量， 可多次指定设置以指定多个需要的投影数量 (例如 `--num-projs 32 --num-projs 64`)，默认值为 32
+- `--vis-num-projs` 可以控制 `--num-projs` 中指定的投影是否需要可视化。默认不进行可视化
+- `--num-workers` 可以增加数据加载的并行度，默认为 4
+- `--devices -d` 可以指定多个 GPU 进行并行处理，（例如 `-d 0 -d 1`） 默认为 0。每个GPU 分配 num-workers / num-devices 个数据加载进程。需要注意ODL始终会在GPU0上占用一定显存进行投影
+
 
 ```bash
-python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 --proj-size 128 128 --vis-num-projs 32
+python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 --proj-size 128 128 -d 0 -d 1 --vis-num-projs 32 --num-workers 16
 ```

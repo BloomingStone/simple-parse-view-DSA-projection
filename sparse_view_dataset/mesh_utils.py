@@ -27,5 +27,5 @@ def get_mesh_in_world(label: Tensor, affine: np.ndarray) -> pv.PolyData:
 
 
 def get_label_clouds_in_world(label: Tensor, affine: np.ndarray) -> Tensor:
-    clouds = torch.stack(torch.where(label), dim=-1)
+    clouds = torch.stack(torch.where(label.squeeze()), dim=-1)
     return apply_affine(clouds, affine)

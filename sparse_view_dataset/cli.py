@@ -36,6 +36,7 @@ def project(
     proj_size: tuple[int, int] = typer.Option(DEFAULT_PROJ_SIZE, help="Size of projection images"),
     num_projs: list[int] = typer.Option(DEFAULT_NUM_PROJS, help="Number of projections to generate"),
     num_workers: int = typer.Option(4, help="Number of workers to use"),
+    devices: list[int] = typer.Option([0], "--device", "-d", help="CUDA device ids to use; workers are split evenly across them"),
     vis_num_projs: list[int] | None = typer.Option(None, help="Number of projections to visualize"),
 ):
     from .projection import process_resampled_directory
@@ -47,5 +48,6 @@ def project(
         proj_size=proj_size,
         num_projs=num_projs,
         num_workers=num_workers,
+        devices=devices,
         vis_num_projs=vis_num_projs,
     )
