@@ -27,7 +27,7 @@ def input_nii_path() -> Path:
 
 @pytest.fixture
 def output_dir() -> Path:
-    return Path("output/test_cone_beam_projs")
+    return Path(__file__).parent / "output" / "test_cone_beam_projs"
 
 
 def save_pngs(

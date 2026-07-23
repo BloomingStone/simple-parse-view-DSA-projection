@@ -61,5 +61,25 @@ def save_gif(output_path: Path, frames: torch.Tensor | np.ndarray, fps_gif: int 
 
     ani = animation.ArtistAnimation(fig, ims, interval=1000 / fps_gif, blit=True, repeat_delay=1000)
     writer = animation.PillowWriter(fps=fps_gif)
-    ani.save(output_path, writer=writer, dpi=dpi, savefig_kwargs={"pad_inches": 0})
+    ani.save(str(output_path), writer=writer, dpi=dpi, savefig_kwargs={"pad_inches": 0})
     plt.close(fig)
+
+def save_pngs(output_path: Path, frames: torch.Tensor | np.ndarray, **imshow_kwargs) -> None:
+    matplotlib.use("Agg")
+    frames = frames.squeeze()
+    if isinstance(frames, torch.Tensor):
+        frames_np = frames.cpu().numpy()
+    else:
+        frames_np = frames
+
+    if "vmin" not in imshow_kwargs or "vmax" not in imshow_kwargs:
+        vmin, vmax = np.percentile(frames_np, [0.05, 99.5])
+        imshow_kwargs.setdefault("vmin", vmin)
+        imshow_kwargs.setdefault("vmax", vmax)
+
+    for i in range(frames_np.shape[0]):
+        fig = plt.figure()
+        plt.imshow(frames_np[i], **imshow_kwargs)
+        plt.axis("off")
+        plt.savefig(output_path / f"frame_{i:04d}.png", pad_inches=0)
+        plt.close(fig)

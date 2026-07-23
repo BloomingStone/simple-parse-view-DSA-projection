@@ -227,3 +227,5 @@ pixi-env/
 
 data
 ori_data
+
+tests/output

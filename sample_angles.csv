@@ -1,0 +1,16 @@
+# Example angle configuration CSV
+# Columns: alpha (RAO), beta (CRA)  in DEGREES
+# Positive alpha = RAO (from front to right, clockwise around Z)
+# Positive beta  = CRA (from front downward, clockwise around rotated X)
+alpha,beta
+0,0
+6,3
+12,6
+18,6
+24,3
+30,0
+-6,-3
+-12,-6
+-18,-6
+-24,-3
+-30,0

@@ -39,10 +39,10 @@ def test_project_one_case_safe_returns_failure_tuple(monkeypatch, tmp_path: Path
     succeeded, returned_path, tb = _project_one_case_safe(
         resampled_coronary_file=case_path,
         original_data_dir=tmp_path,
-        num_projs=(32,),
+        angle_configs=[],
         proj_size=(512, 512),
         output_dir=tmp_path,
-        vis_num_projs=None,
+        num_of_vis=0,
     )
 
     assert succeeded is False

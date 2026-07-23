@@ -122,15 +122,44 @@ class Torch3DLabelRenderer:
 
         # 旋转矩阵和源点位置
         # 这里的 R/T 组合用于构造 PyTorch3D 所需的 world-to-camera 外参。
-        R = torch.from_numpy(self.geo.rotation_matrix(angles)).to(self.reorient_rot)  # (B, 3, 3), R_c2w
-        R = R @ self.reorient_rot
-        T = torch.from_numpy(self.geo.src_position(angles)).to(self.reorient_rot)     # (B, 3)
+        if self.projection.alphas_sorted is not None and self.projection.betas_sorted is not None:
+            # ===== (alpha, beta) 模式：直接从欧拉角计算 R/T =====
+            # R_c2w = R_z(-alpha) @ R_x(-beta)
+            # 源位置 = R_c2w @ (0, -dso, 0)
+            alphas = torch.from_numpy(self.projection.alphas_sorted).to(torch.float32).to(self.device)
+            betas = torch.from_numpy(self.projection.betas_sorted).to(torch.float32).to(self.device)
+            dso = float(self.param.dso)
 
-        # PyTorch3D 的相机外参是 world-to-camera 形式：
-        #   X_cam = R * X_world + T
-        # 若已知相机中心在 world 中的位置 C，则平移项为：
-        #   T = -R^T * C
-        T = -torch.einsum("bmn,bn->bm", (R.transpose(-2, -1), T))
+            cos_a = torch.cos(-alphas)
+            sin_a = torch.sin(-alphas)
+            cos_b = torch.cos(-betas)
+            sin_b = torch.sin(-betas)
+            zero = torch.zeros_like(cos_a)
+            one = torch.ones_like(cos_a)
+
+            # R_z(-alpha) @ R_x(-beta)  (B, 3, 3)
+            R_c2w = torch.stack([
+                torch.stack([cos_a, -cos_b * sin_a,  sin_b * sin_a], dim=-1),
+                torch.stack([sin_a,  cos_a * cos_b, -cos_a * sin_b], dim=-1),
+                torch.stack([zero,   sin_b,           cos_b],        dim=-1),
+            ], dim=-2)
+
+            R = R_c2w @ self.reorient_rot
+
+            # 源位置: R_c2w @ (0, -dso, 0)
+            src = R_c2w @ torch.tensor([0.0, -dso, 0.0], device=self.device)
+            T = -torch.einsum("bmn,bn->bm", (R.transpose(-2, -1), src))
+        else:
+            # ===== 原始 ODL 模式（兼容旧代码）=====
+            R = torch.from_numpy(self.geo.rotation_matrix(angles)).to(self.reorient_rot)  # (B, 3, 3), R_c2w
+            R = R @ self.reorient_rot
+            T = torch.from_numpy(self.geo.src_position(angles)).to(self.reorient_rot)     # (B, 3)
+
+            # PyTorch3D 的相机外参是 world-to-camera 形式：
+            #   X_cam = R * X_world + T
+            # 若已知相机中心在 world 中的位置 C，则平移项为：
+            #   T = -R^T * C
+            T = -torch.einsum("bmn,bn->bm", (R.transpose(-2, -1), T))
 
         cameras = FoVPerspectiveCameras(
             device=self.device,
