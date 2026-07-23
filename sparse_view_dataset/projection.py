@@ -208,6 +208,7 @@ def project_one_case(
             )
             save_gif(vis_dir/'ori_projs.gif', ori_projs.transpose(-1, -2), origin="lower", cmap='gray')
             save_gif(vis_dir/'label_projs.gif', res["label_projs"].transpose(-1, -2), origin="lower", cmap='gray')
+            save_gif(vis_dir/'projs.gif', res["projs"].transpose(-1, -2), origin="lower", cmap='gray')
             save_gif(vis_dir/'depth.gif', res["depth"].transpose(-1, -2), origin="lower", cmap='gray')
             save_gif(vis_dir/'mask_2d.gif', res["mask_2d"].transpose(-1, -2), origin="lower", cmap='gray')
 

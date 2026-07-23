@@ -56,8 +56,8 @@ def test_cone_beam_projs(
     input_nii_path: Path,
     output_dir: Path
 ) -> None:
-    img = nib.loadsave.load(input_nii_path)
-    assert isinstance(img, nib.nifti1.Nifti1Image), "Loaded image is not a NIfTI image."
+    img = nib.load(input_nii_path)
+    assert isinstance(img, nib.Nifti1Image), "Loaded image is not a NIfTI image."
     assert img.affine is not None, "Affine matrix is missing in the input NIfTI file."
     
     data = img.get_fdata()  # (W, H, D)
@@ -93,8 +93,8 @@ def test_cone_beam_from_spacing_data(
     input_nii_path: Path,
     output_dir: Path
 ) -> None:
-    img = nib.loadsave.load(input_nii_path)
-    assert isinstance(img, nib.nifti1.Nifti1Image), "Loaded image is not a NIfTI image."
+    img = nib.load(input_nii_path)
+    assert isinstance(img, nib.Nifti1Image), "Loaded image is not a NIfTI image."
     
     data = img.get_fdata()  # (W, H, D)
     assert data.ndim == 3, "Input image is not 3D."
