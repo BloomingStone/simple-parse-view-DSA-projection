@@ -12,6 +12,8 @@ def plot_cloud_and_projs(gif_path: Path, cloud: torch.Tensor, projs: torch.Tenso
     n_proj_, _, _ = cloud.shape
     assert n_proj == n_proj_
 
+    projs = torch.rot90(projs, k=-1, dims=(1, 2))  # opencv —> vtk
+    
     x = np.linspace(0, 1, w)
     z = np.linspace(0, 1, h)
     x, z = np.meshgrid(x, z)

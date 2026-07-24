@@ -73,7 +73,7 @@ class TestConeBeamParamsInitFromAngles:
 
 
 class TestConeBeamGeometrySourcePosition:
-    """Verify that ODL geometry + src_shift_func matches the Euler Z-X formula."""
+    """Verify that exported R/T from to_dict matches the Euler Z-X formula."""
 
     def test_source_position_matches_euler(self, volume_params, sample_angles):
         params = ConeBeamParams.init_from_angles(
@@ -82,35 +82,33 @@ class TestConeBeamGeometrySourcePosition:
             betas=sample_angles["betas"],
         )
         proj = params.get_projection()
-        geometry = proj.geometry
-        angles = geometry.angles
-        src_pos = geometry.src_position(angles)
+        d = proj.to_dict()
+        T_exported = np.array(d["T"])
 
         # Compute expected source positions via Euler Z-X
-        assert proj.alphas_sorted is not None and proj.betas_sorted is not None
-        expected = [
+        expected = np.array([
             R_z(-a) @ R_x(-b) @ np.array([0.0, -params.dso, 0.0])
             for a, b in zip(proj.alphas_sorted, proj.betas_sorted)
-        ]
-        expected = np.array(expected)
+        ])
 
-        assert np.allclose(src_pos, expected,
-                           atol=1e-5), f"Max error: {np.abs(src_pos - expected).max():.2e}"
+        assert np.allclose(T_exported, expected,
+                           atol=1e-5), f"Max error: {np.abs(T_exported - expected).max():.2e}"
 
-    def test_zero_beta_matches_odl_rotation(self, volume_params):
-        """When beta=0, source position should match pure Z rotation."""
+    def test_zero_beta_to_dict_matches_euler(self, volume_params):
+        """When beta=0, to_dict R/T should match pure Z rotation."""
         alphas = np.deg2rad(np.array([-28.6, -17.2, 0.0, 17.2, 28.6]))
         betas = np.zeros(5)
         params = ConeBeamParams.init_from_angles(
             **volume_params, alphas=alphas, betas=betas,
         )
-        geometry = params.build_conebeam_geometry()[1]
-        src_pos = geometry.src_position(geometry.angles)
+        proj = params.get_projection()
+        d = proj.to_dict()
+        T_exported = np.array(d["T"])
         expected = np.array([
-            R_z(a) @ np.array([0.0, -params.dso, 0.0])
-            for a in geometry.angles
+            R_z(-a) @ R_x(-b) @ np.array([0.0, -params.dso, 0.0])
+            for a, b in zip(proj.alphas_sorted, proj.betas_sorted)
         ])
-        assert np.allclose(src_pos, expected, atol=1e-5)
+        assert np.allclose(T_exported, expected, atol=1e-5)
 
 
 class TestProjectionConeBeamAlphaBeta:
@@ -121,10 +119,10 @@ class TestProjectionConeBeamAlphaBeta:
             betas=sample_angles["betas"],
         )
         proj = params.get_projection()
-        assert proj.alphas_sorted is not None
-        assert proj.betas_sorted is not None
-        # ODL angles = -alphas_sorted (up to sorting)
-        assert np.allclose(proj.geometry.angles, -proj.alphas_sorted)
+        assert len(proj.alphas_sorted) == 7
+        assert len(proj.betas_sorted) == 7
+        # angles in to_dict = -alphas_sorted (up to sorting)
+        assert np.allclose(np.array(proj.to_dict()["angles"]), -proj.alphas_sorted)
 
     def test_forward_projection_shape(self, volume_params, sample_angles):
         params = ConeBeamParams.init_from_angles(
@@ -209,8 +207,8 @@ class TestTorch3DLabelRendererAlphaBeta:
         assert "test" in res_clouds
         assert res_clouds["test"].shape == (7, 8, 3)
 
-    def test_renderer_legacy_mode(self, volume_params):
-        """Verify backward compatibility: no alphas → use ODL geometry path."""
+    def test_renderer_from_init_from(self, volume_params):
+        """Renderer works with init_from (uniform angles via init_from_angles)."""
         params = ConeBeamParams.init_from(
             **{k: v for k, v in volume_params.items() if k != "dde" and k != "dso"},
             num_proj=5,
@@ -220,8 +218,8 @@ class TestTorch3DLabelRendererAlphaBeta:
             dso=400.0,
         )
         projection = params.get_projection()
-        assert projection.alphas_sorted is None
-        assert projection.betas_sorted is None
+        assert len(projection.alphas_sorted) == 5
+        assert len(projection.betas_sorted) == 5
 
         import pyvista as pv
         from sparse_view_dataset.torch3d_render import Torch3DLabelRenderer

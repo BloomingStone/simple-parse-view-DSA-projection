@@ -72,7 +72,7 @@ data/asoca_size128_spacing0-7/
 `project` 的职责是把重采样后的冠脉标签和原始 CT 体数据转成投影训练样本。核心逻辑在包内以下模块中：
 
 - `[sparse_view_dataset/projection.py](sparse_view_dataset/projection.py)`：投影流程的总控与文件级别的批处理。
-- `[sparse_view_dataset/cone_beam.py](sparse_view_dataset/cone_beam.py)`：投影算子封装 — (alpha, beta) 模式使用 DiffDRR，旧模式使用 ODL 兼容路径。
+- `[sparse_view_dataset/cone_beam.py](sparse_view_dataset/cone_beam.py)`：投影算子封装 — 使用 DiffDRR（已移除 ODL 兼容路径）。
 - `[sparse_view_dataset/torch3d_render.py](sparse_view_dataset/torch3d_render.py)`：基于 PyTorch3D 的 mask/depth 渲染器与相机设置。
 - `[sparse_view_dataset/mesh_utils.py](sparse_view_dataset/mesh_utils.py)`：从体数据提取 mesh、平滑等工具（PyVista / marching-cubes 相关）。
 - `[sparse_view_dataset/visualize.py](sparse_view_dataset/visualize.py)`：可视化、GIF 生成与导出小工具。
@@ -95,11 +95,11 @@ data/asoca_size128_spacing0-7/
 ```bash
 # 从 CSV 文件读取角度
 python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 \
-    --proj-size 128 128 --angle-csv angles.csv --num-of-vis 5
+    --proj-size 128 128 --angle-csv angles.csv --do-vis
 
 # 直接指定 alpha/beta 角度对
 python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 \
-    --proj-size 128 128 --alpha-betas "0.0,0.0;0.5,0.1;1.0,0.2" --num-of-vis 3
+    --proj-size 128 128 --alpha-betas "0.0,0.0;0.5,0.1;1.0,0.2" --do-vis
 
 # 随机角度测试
 python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 \
@@ -108,7 +108,7 @@ python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/a
 # 多个角度配置 + 多 GPU
 python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 \
     --proj-size 128 128 --angle-csv angles_a.csv --angle-csv angles_b.csv \
-    -d 0 -d 1 --num-workers 16 --num-of-vis 5
+    -d 0 -d 1 --num-workers 16 --do-vis
 ```
 
 也可以直接使用包入口：
@@ -126,7 +126,7 @@ python -m sparse_view_dataset project data/asoca_size128_spacing0-7/ ./ori_data/
 - `--angle-csv`：CSV 文件路径，含两列 (alpha, beta)，可重复指定多个文件
 - `--alpha-betas`：直接指定角度对，格式为 `"alpha1,beta1;alpha2,beta2;..."`
 - `--num-random`：随机生成 N 个 (alpha, beta) 角度对用于测试
-- `--num-of-vis`：可视化前 N 个角度的结果（0 = 不可视化）
+- `--do-vis`：是否生成可视化图像
 - `--num-workers`：并行处理进程数（默认 4）
 - `-d / --device`：指定 CUDA 设备 ID，可重复（如 `-d 0 -d 1`）
 
@@ -149,7 +149,7 @@ data/asoca_proj_128/
     custom_5_projs/                           # 另一个角度配置
         Diseased_17_lca.pt
         Diseased_17_rca.pt
-        ...
+```
 
 `.pt` 文件中包含以下键：
 
@@ -169,7 +169,30 @@ data/asoca_proj_128/
 - 先通过裁剪和重采样，把不同病例归一到相似的局部体素空间。
 - 再通过 affine 修正、中心化和重排，让三维体数据、mesh、点云和二维投影使用同一套几何约定。
 
-这也是为什么代码里会同时处理数据数组和 affine 矩阵。只改数组不改 affine，会导致后续 ODL、PyTorch3D 和点云坐标错位。
+这也是为什么代码里会同时处理数据数组和 affine 矩阵。只改数组不改 affine，会导致后续 DiffDRR、PyTorch3D 和点云坐标错位。
+### 图像坐标约定
+
+投影图像在不同模块中遵循不同的坐标约定，需要在可视化时做相应旋转对齐：
+
+| 模块/库 | 原点位置 | 行方向 (dim=1) | 列方向 (dim=2) | 约定 |
+|:---|:---|:---|:---|:---|
+| DiffDRR / matplotlib / OpenCV | 左上角 (A) | 向下 (X) | 向右 (Y) | opencv 屏幕约定 |
+| PyVista / VTK | 左下角 (B) | 向右 (X) | 向上 (Y) | 笛卡尔/OpenGL texture 约定 |
+| PyTorch3D (NDC) | 左上角 (A) | 向下 | 向右 | opencv 屏幕约定 |
+
+之前（ODL 时代）的坐标流转路径：
+1. PyTorch3D (A) → ODL 投影 → 输出为 (B) 约定
+2. ODL (B) → `save_gif(origin="lower", transpose)` → pyplot (A)
+
+现在（DiffDRR 时代）的坐标流转路径：
+1. DiffDRR (A), PyTorch3D (A) → 统一存储为 (A) 约定
+2. 可视化 → `torch.rot90(projs, k=-1, dims=(1,2))` → PyVista/VTK (B) 约定
+
+关键变更：
+- **`torch.rot90(projs, k=-1, dims=(1, 2))`**：将图像逆时针旋转 90°，把 opencv 约定 (A) 转为 VTK 约定 (B)。对应 `visualize.py` 中 `plot_cloud_and_projs` 函数的首行操作。
+- **去掉了 `save_gif` 中的 `origin="lower"` 和 `.transpose(-1, -2)`**：因为投影数据统一使用 (A) 约定存储，pyplot 默认的 `origin="upper"` 就是正确显示方式，不再需要坐标翻转。
+- **去掉了 `torch3d_render.py` 中的 `.rot90(-1, [-2, -1])`**：之前因为 ODL 输出为 (B) 而 PyTorch3D 渲染为 (A)，需要旋转对齐；现在两者都是 (A)，不再需要旋转。
+
 ### 坐标系 (RAS)
 
 所有几何计算使用 RAS 右手坐标系：
@@ -219,16 +242,15 @@ conda env create -f environment.yaml
 ## 5. 注意事项
 
 - `project` 依赖 CUDA、DiffDRR、PyTorch3D 和 PyVista，运行前需要保证这些组件可用。
-- 旧模式（无 alpha/beta 角度）仍使用 ODL RayTransform；新模式使用 DiffDRR（trilinear 渲染器）。
+- 投影算子仅使用 DiffDRR（trilinear 渲染器），已移除 ODL 依赖。
 - 原始数据目录需要同时包含 `coronary/` 和 `volume/` 两个子目录，且同一病例文件名必须一致。
 - `separate_coronary` 默认按连通域和质心位置区分 LCA / RCA，假设输入坐标方向与原始数据一致。
-- 当前实现即使指定 `CUDA_VISIBLE_DEVICES`，仍可能占用少量 GPU 0 显存，这通常来自 PyTorch3D、OpenGL 或 ODL 的底层初始化。
 - 如果输入标签不是标准 NIfTI，或者冠脉不是两个主要连通分支，分支拆分结果可能不稳定。
 
 ## 6. 开发建议
 
 - 如果你要改裁剪、连通域或 affine 规则，优先看 [sparse_view_dataset/preprocess.py](sparse_view_dataset/preprocess.py) 和 [sparse_view_dataset/affine_transforms.py](sparse_view_dataset/affine_transforms.py)。
-- 如果你要改投影几何或投影算子，优先看 [sparse_view_dataset/cone_beam.py](sparse_view_dataset/cone_beam.py)（ProjectionConeBeam — DiffDRR / ODL）以及 [sparse_view_dataset/projection.py](sparse_view_dataset/projection.py)（pipeline 编排）。
+- 如果你要改投影几何或投影算子，优先看 [sparse_view_dataset/cone_beam.py](sparse_view_dataset/cone_beam.py)（ProjectionConeBeam — DiffDRR）以及 [sparse_view_dataset/projection.py](sparse_view_dataset/projection.py)（pipeline 编排）。
 - 如果你要改 mesh 渲染或点云对齐，优先看 [sparse_view_dataset/torch3d_render.py](sparse_view_dataset/torch3d_render.py)。
 - 如果你要改 mesh 相关实现，优先看 [sparse_view_dataset/mesh_utils.py](sparse_view_dataset/mesh_utils.py)。
 - 如果你要改可视化输出或 GIF 生成，优先看 [sparse_view_dataset/visualize.py](sparse_view_dataset/visualize.py)。
@@ -248,7 +270,7 @@ python main.py crop ./ori_data/asoca/coronary/ data/asoca_size128_spacing0-7 --t
   - `--angle-csv path.csv`：从 CSV 文件读取 (alpha, beta) 列，可重复指定多个文件
   - `--alpha-betas "a1,b1;a2,b2;..."`：命令行直接指定角度对（度）
   - `--num-random N`：随机生成 N 个角度用于测试
-- `--num-of-vis N` 控制前 N 个角度的可视化（默认 0 = 不可视化）
+- `--do-vis`：是否生成可视化图像
 - `--num-workers` 可以增加数据加载的并行度，默认为 4
 - `--devices -d` 可以指定多个 GPU 进行并行处理，（例如 `-d 0 -d 1`） 默认为 0。每个GPU 分配 num-workers / num-devices 个数据加载进程
 
@@ -256,14 +278,16 @@ python main.py crop ./ori_data/asoca/coronary/ data/asoca_size128_spacing0-7 --t
 ```bash
 # CSV 文件方式（角度制）
 python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 \
-    --proj-size 128 128 -d 0 -d 1 --angle-csv sample_angles.csv --num-of-vis 32 --num-workers 16
+    --proj-size 128 128 -d 0 -d 1 --angle-csv sample_angles.csv --do-vis --num-workers 16
 
 # 直接指定角度（度）
 python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 \
-    --proj-size 128 128 -d 0 -d 1 --alpha-betas "0,0;10,5;20,10;30,5" --num-of-vis 4 --num-workers 16
+    --proj-size 128 128 -d 0 -d 1 --alpha-betas "0,0;10,5;20,10;30,5" --do-vis --num-workers 16
 ```
 
 ## 8. test
+
+- [ ] TODO 需要更新下载链接
 
 可以在这里下载 [test_data](https://drive.google.com/drive/folders/1Gt5i_6Yvr-s1T9pTs_or9qTj4VUfyJ2L?usp=sharing)
 

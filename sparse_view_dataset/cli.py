@@ -60,7 +60,7 @@ def project(
     num_random: int | None = typer.Option(None, "--num-random", help="Generate N random (alpha,beta) pairs for testing"),
     num_workers: int = typer.Option(4, help="Number of workers to use"),
     devices: list[int] = typer.Option([0], "--device", "-d", help="CUDA device ids to use; workers are split evenly across them"),
-    num_of_vis: int = typer.Option(0, "--num-of-vis", help="Number of first angles to visualize (0 = no visualization)"),
+    do_vis: bool = typer.Option(False, help="Whether to generate visualization images"),
 ):
     from .projection import process_resampled_directory, make_angle_configs
 
@@ -84,5 +84,5 @@ def project(
         angle_configs=angle_configs,
         num_workers=num_workers,
         devices=devices,
-        num_of_vis=num_of_vis,
+        do_vis=do_vis
     )

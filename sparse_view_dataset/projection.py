@@ -13,7 +13,7 @@ import torch.nn as nn
 from tqdm import tqdm
 
 from .constants import MU_IDODINE, MU_WATER
-from .affine_transforms import centerize_affine, centerize_ori_affine, make_affine_spacing_positive
+from .affine_transforms import apply_affine, recenter_affine
 from .io import read_nii_data
 from .cone_beam import ConeBeamParams
 from .torch3d_render import Torch3DLabelRenderer
@@ -88,7 +88,7 @@ def make_angle_configs(
 
     if not configs:
         raise ValueError(
-            "至少需要提供一种角度配置：CSV 文件、直接指定 alpha/beta 或使用随机生成。"
+            "至少需要提供一种角度配置：CSV 文件、直接指定 alpha/beta 或使用 num_random 指定随机生成数量。"
         )
 
     return configs
@@ -159,7 +159,7 @@ def project_one_case(
     angle_configs: list[dict],
     proj_size: tuple[int, int],
     output_dir: Path,
-    num_of_vis: int = 0,
+    do_vis: bool = False,
     device: torch.device | None = None,
 ) -> None:
     device = device or _get_worker_device()
@@ -183,20 +183,30 @@ def project_one_case(
     # read original data
     ori_vol_data, ori_affine = read_nii_data(ori_volume_file)
 
-    # ODL need positive spacing, so make affine spacing positive and adjust the data accordingly
-    ori_vol_data, ori_affine_positive = make_affine_spacing_positive(ori_vol_data, ori_affine)
-
     # \mu = \mu_w ( 1 + HU/1000 )
     # \int \mu dl = \int \mu_w ( 1 + HU/1000 ) dl = \int \mu_w dl + \int \mu_w HU/1000 dl  = \mu_w L + \mu_w / 1000 \int HU dl
     # \mu_w L is a constant offset that depends on the total length of the ray in the volume, and does not affect the relative contrast.
     # Therefore, Hu is not suitable for projection and rendering, convert to linear attenuation coefficient (mu) using a simple water-based model
     ori_vol_data = Hu_to_mu(ori_vol_data)
 
-    # 将重采样图像的 affine 中心化，使得重采样label的中心点在世界坐标系中的位置为 (0, 0, 0)
-    # 同时将 原始分辨率图像对齐到中心化后的重采样图像
-    resample_cor_affine_centered = centerize_affine(resample_cor_affine, np.array(resampled_cor_data.shape))
-    ori_affine_centralized = centerize_ori_affine(ori_affine_positive, resampled_cor_data.shape, resample_cor_affine)
+    def get_new_world_center() -> np.ndarray:
+        cor_shape = np.array(resampled_cor_data.shape)
+        ori_shape = np.array(ori_vol_data.shape)
+        cor_center_voxel = (cor_shape - 1) / 2
+        ori_center_voxel = (ori_shape - 1) / 2
+        cor_center_world = apply_affine(cor_center_voxel, resample_cor_affine)
+        ori_center_world = apply_affine(ori_center_voxel, ori_affine)
+        x_cor, y_cor, z_cor = cor_center_world
+        x_ori, y_ori, z_ori = ori_center_world
+        
+        # 冠脉label在volume中的位置偏高，如果全使用冠脉中心，会导致DRR投影时图像上方超出volume范围，显示西欧爱过不佳
+        return np.array((x_cor, y_cor, (z_ori + z_cor) / 2))
+    
+    new_world_center = get_new_world_center()
 
+    resample_cor_affine_centered = recenter_affine(resample_cor_affine, new_world_center)
+    ori_affine_centralized = recenter_affine(ori_affine, new_world_center)
+    
     skeleton_np = skeletonize(resampled_cor_data)
 
     ori_vol_data_tensor = torch.from_numpy(ori_vol_data.copy())[None].to(device)
@@ -243,8 +253,9 @@ def project_one_case(
         silhouette, depth, res_clouds = mesh_renderer.render(mesh, point_clouds)
 
         res = {
-            "projs": xca_vis.cpu(),
-            "ori_projs": ori_projs.cpu(),
+            "ori_projs": ori_projs.cpu(),   # 保存原始体积（吸收率）的投影结果
+            "xca_raw": xca_raw.cpu(),       # 原始数据叠加冠脉标签后 通过 exp(-x) 转化为相对强度
+            "projs": xca_vis.cpu(),         # xca_raw 经过 gamma 校正后的可视化结果
             "label_projs": label_projs.cpu(),
             "mask_2d": silhouette.cpu(),
             "depth": depth.cpu(),
@@ -264,35 +275,31 @@ def project_one_case(
         res["branch_type"] = branch_type
         torch.save(res, sub_dir / f"{case_name}_{branch_type}.pt")
 
-        if num_of_vis > 0:
-            vis_dir = sub_dir / "vis" / f"{case_name}_{branch_type}"
-            vis_dir.mkdir(exist_ok=True, parents=True)
-            # 只取前 num_of_vis 个角度做可视化
-            n_vis = min(num_of_vis, ori_projs.shape[0])
-            vis_ori_projs = ori_projs[:n_vis]
-            vis_label_projs = label_projs[:n_vis]
-            vis_projs = xca_vis[:n_vis]
-            vis_depth = depth[:n_vis]
-            vis_mask = silhouette[:n_vis]
-            vis_bg_mask = res["bg_mask"][:n_vis] if res["bg_mask"].ndim > 1 else res["bg_mask"]
-            vis_cl_mask = res["cl_mask"][:n_vis] if res["cl_mask"].ndim > 1 else res["cl_mask"]
+        if not do_vis:
+            continue
+        
+        vis_dir = sub_dir / "vis" / f"{case_name}_{branch_type}"
+        vis_dir.mkdir(exist_ok=True, parents=True)
+        bg_mask = res["bg_mask"]
+        cl_mask = res["cl_mask"]
 
-            plot_cloud_and_projs(
-                vis_dir / 'bg_mask_and_projs.gif',
-                vis_bg_mask,
-                vis_ori_projs,
-            )
+        plot_cloud_and_projs(
+            vis_dir / 'bg_mask_and_projs.gif',
+            bg_mask,
+            ori_projs,
+        )
 
-            plot_cloud_and_projs(
-                vis_dir / 'cl_mask_and_depth.gif',
-                vis_cl_mask,
-                vis_depth,
-            )
-            save_gif(vis_dir / 'ori_projs.gif', vis_ori_projs.transpose(-1, -2), origin="lower", cmap='gray')
-            save_gif(vis_dir / 'label_projs.gif', vis_label_projs.transpose(-1, -2), origin="lower", cmap='gray')
-            save_gif(vis_dir / 'projs.gif', vis_projs.transpose(-1, -2), origin="lower", cmap='gray')
-            save_gif(vis_dir / 'depth.gif', vis_depth.transpose(-1, -2), origin="lower", cmap='gray')
-            save_gif(vis_dir / 'mask_2d.gif', vis_mask.transpose(-1, -2), origin="lower", cmap='gray')
+        plot_cloud_and_projs(
+            vis_dir / 'cl_mask_and_depth.gif',
+            cl_mask,
+            depth,
+        )
+        save_gif(vis_dir / 'ori_projs.gif', ori_projs, cmap='gray')
+        save_gif(vis_dir / 'label_projs.gif', label_projs, cmap='gray')
+        save_gif(vis_dir / 'projs.gif', xca_vis, cmap='gray')
+        save_gif(vis_dir / 'xca_raw.gif', xca_raw, cmap='gray')
+        save_gif(vis_dir / 'depth.gif', depth)
+        save_gif(vis_dir / 'mask_2d.gif', silhouette, cmap='gray')
 
         torch.cuda.empty_cache()
 
@@ -305,7 +312,7 @@ def _project_one_case_safe(
     angle_configs: list[dict],
     proj_size: tuple[int, int],
     output_dir: Path,
-    num_of_vis: int = 0,
+    do_vis: bool = False,
     device: torch.device | None = None,
 ) -> tuple[bool, Path, str]:
     try:
@@ -315,8 +322,8 @@ def _project_one_case_safe(
             angle_configs=angle_configs,
             proj_size=proj_size,
             output_dir=output_dir,
-            num_of_vis=num_of_vis,
             device=device,
+            do_vis=do_vis
         )
         return True, resampled_coronary_file, ""
     except Exception:
@@ -348,9 +355,6 @@ def _pool_worker_init(device_schedule: list[int]) -> None:
     worker_index = proc._identity[0] - 1 if proc._identity else 0
     device_id = device_schedule[worker_index % len(device_schedule)]
     torch.cuda.set_device(device_id)
-    
-    import astra
-    astra.set_gpu_index(device_id)
 
     global _WORKER_DEVICE
     _WORKER_DEVICE = torch.device(f"cuda:{device_id}")
@@ -365,7 +369,7 @@ def process_resampled_directory(
     angle_configs: list[dict] | None = None,
     num_workers: int = 4,
     devices: list[int] | tuple[int, ...] = (0,),
-    num_of_vis: int = 0,
+    do_vis: bool = False,
 ) -> None:
     if angle_configs is None:
         # 默认：生成一组随机角度用于测试
@@ -393,7 +397,7 @@ def process_resampled_directory(
         angle_configs=angle_configs,
         proj_size=proj_size,
         output_dir=output_dir,
-        num_of_vis=num_of_vis,
+        do_vis=do_vis,
     )
 
     ctx = mp.get_context("spawn")
