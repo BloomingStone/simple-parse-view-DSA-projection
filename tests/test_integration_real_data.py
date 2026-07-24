@@ -77,12 +77,12 @@ def test_data():
 
 
 @pytest.fixture(scope="module")
-def some_angles():
+def some_angles() -> tuple[np.ndarray, np.ndarray]:
     """Small set of (alpha, beta) in degrees, auto-converted to radians.
     Includes duplicate alphas to verify DiffDRR handles them correctly.
     """
-    alphas_deg = np.array([-30, -15, 0, 15, 30, 30, 30, 30])
-    betas_deg = np.array([0, 0, 0, 0, 0, 15, 30, 45])
+    alphas_deg = np.array([-90, -60, -30, -15, 0,  0,  0,  0,  0,  0])
+    betas_deg = np.array([ 0,   0,   0,   0,   0,  15, 30, 45, 60, 75])
     return np.deg2rad(alphas_deg), np.deg2rad(betas_deg)
 
 
@@ -97,10 +97,10 @@ class TestProjectionWithRealData:
             betas=betas,
             proj_size=(64, 64),
         )
-        assert params.num_proj == 8
+        assert params.num_proj == 10
         proj = params.get_projection()
-        assert len(proj.alphas_sorted) == 8
-        assert len(proj.betas_sorted) == 8
+        assert len(proj.alphas) == 10
+        assert len(proj.betas) == 10
 
     def test_forward_project(self, test_data, some_angles, test_output_dir):
         """Forward project real volume and verify output."""
@@ -119,7 +119,7 @@ class TestProjectionWithRealData:
         vol_tensor = torch.from_numpy(test_data["ori_vol_data"].copy())[None].float()
         projs = projector(vol_tensor).squeeze()
 
-        assert projs.shape == (8, 64, 64), f"Unexpected shape: {projs.shape}"
+        assert projs.shape == (10, 64, 64), f"Unexpected shape: {projs.shape}"
         assert projs.isfinite().all(), "Projection contains NaN/Inf"
 
         # Save for inspection
@@ -145,7 +145,7 @@ class TestProjectionWithRealData:
         data_tensor = torch.from_numpy(test_data["resampled_cor_data"].copy())[None].float()
         label_projs = projector(data_tensor).squeeze()
 
-        assert label_projs.shape == (8, 64, 64)
+        assert label_projs.shape == (10, 64, 64)
         assert label_projs.isfinite().all()
 
         # Label projections should have higher values where coronary exists
@@ -194,7 +194,7 @@ class TestProjectionWithRealData:
         xca_raw = torch.exp(-(ori_projs + label_projs * MU_IDODINE))
         xca_vis = torch.pow(xca_raw, 0.1)
 
-        assert xca_vis.shape == (8, 64, 64)
+        assert xca_vis.shape == (10, 64, 64)
         assert xca_vis.isfinite().all()
         assert (xca_vis > 0).all(), "DRR should be positive"
 
@@ -244,8 +244,8 @@ class TestProjectionWithRealData:
         renderer = Torch3DLabelRenderer(projector, device)
         silhouette, depth, res_clouds = renderer.render(mesh, point_clouds)
 
-        assert silhouette.shape == (8, 64, 64)
-        assert depth.shape == (8, 64, 64)
+        assert silhouette.shape == (10, 64, 64)
+        assert depth.shape == (10, 64, 64)
 
         torch.save(
             {
@@ -257,74 +257,27 @@ class TestProjectionWithRealData:
         )
         print(f"\n  Saved: {test_output_dir / 'render.pt'}")
         print(f"  Silhouette - pixels covered: {silhouette.sum().item():.0f} / {silhouette.numel()}")
+        print(f"  Depth - min: {depth.min().item():.2f}, max: {depth.max().item():.2f}")
 
-    def test_visualize_results(self, test_data, some_angles, test_output_dir):
+    def test_generate_visualization_gifs_real(self, some_angles, test_output_dir):
         """Generate visualization GIFs from projection and rendering results."""
         import torch
 
-        from sparse_view_dataset.constants import MU_IDODINE
-        from sparse_view_dataset.mesh_utils import get_mesh_in_world, get_label_clouds_in_world
-        from sparse_view_dataset.torch3d_render import Torch3DLabelRenderer
-        from sparse_view_dataset.visualize import plot_cloud_and_projs, save_gif
+        from sparse_view_dataset.projection import _project_one_case_inner
+        from sparse_view_dataset.projection_angles import ProjectionAngles
 
         alphas, betas = some_angles
-
-        # ---- CT projection ----
-        params_ct = ConeBeamParams.init_from_angles(
-            volume_size=test_data["ori_vol_data"].shape,
-            affine=test_data["ori_affine_centralized"],
-            alphas=alphas, betas=betas,
+        
+        
+        _project_one_case_inner(
+            resampled_coronary_file=TEST_DATA_DIR / f"{TEST_CASE}_{BRANCH}.nii.gz",
+            ori_volume_file=TEST_DATA_DIR / f"{TEST_CASE}.nii.gz",
+            case_name=f"test_case_{TEST_CASE}_{BRANCH}",
+            branch_type=BRANCH,
             proj_size=(64, 64),
-        )
-        ct_proj = params_ct.get_projection()
-        ct_tensor = torch.from_numpy(test_data["ori_vol_data"].copy())[None].float()
-        ori_projs = ct_proj(ct_tensor).squeeze()
-
-        # ---- Label projection ----
-        params_label = ConeBeamParams.init_from_angles(
-            volume_size=test_data["resampled_cor_data"].shape,
-            affine=test_data["resample_cor_affine_centered"],
-            alphas=alphas, betas=betas,
-            proj_size=(64, 64),
-        )
-        label_proj = params_label.get_projection()
-        label_tensor = torch.from_numpy(test_data["resampled_cor_data"].copy())[None].float()
-        label_projs = label_proj(label_tensor).squeeze()
-
-        xca_raw = torch.exp(-(ori_projs + label_projs * MU_IDODINE))
-        xca_vis = torch.pow(xca_raw, 0.1)
-
-        # ---- Render ----
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        data_tensor = torch.from_numpy(test_data["resampled_cor_data"].copy()).to(device)
-        mesh = get_mesh_in_world(data_tensor, affine=test_data["resample_cor_affine_centered"])
-        point_clouds = {
-            "bg_mask": get_label_clouds_in_world(
-                data_tensor, affine=test_data["resample_cor_affine_centered"]
-            ),
-        }
-        if mesh.n_points == 0 or mesh.n_cells == 0:
-            pytest.skip("Empty mesh for this case")
-
-        renderer = Torch3DLabelRenderer(params_label.get_projection(), device)
-        silhouette, depth, res_clouds = renderer.render(mesh, point_clouds)
-
-        # ---- Save visualization GIFs ----
-        vis_dir = test_output_dir / "vis"
-        vis_dir.mkdir(parents=True, exist_ok=True)
-
-        # DRR projections GIF
-        save_gif(vis_dir / "ori_projs.gif", ori_projs, cmap="gray")
-        save_gif(vis_dir / "label_projs.gif", label_projs, cmap="gray")
-        save_gif(vis_dir / "projs.gif", xca_vis, cmap="gray")
-
-        # Depth and mask GIFs
-        save_gif(vis_dir / "depth.gif", depth, cmap="viridis")
-        save_gif(vis_dir / "mask_2d.gif", silhouette, cmap="gray")
-
-        # Point cloud overlay GIF
-        plot_cloud_and_projs(
-            vis_dir / "bg_mask_and_projs.gif",
-            res_clouds["bg_mask"],
-            xca_vis,
+            output_dir=test_output_dir,
+            # some_angles 返回弧度，直接构造 ProjectionAngles（内部存储为弧度）
+            angles=ProjectionAngles(np.column_stack((alphas, betas))),
+            vis=True,
+            device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         )

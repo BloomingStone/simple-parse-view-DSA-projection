@@ -10,11 +10,15 @@ dependencies:
 - imageio >=2.37.0,<3
 - pytest *
 - scikit-image >=0.25.2,<0.26
-- typer >=0.20.0,<0.21
 - pytorch3d >=0.7.7,<0.8
 - odl >=0.8.3,<0.9
 - astra-toolbox >=2.4.0,<3
+- notebook >=7.5.6,<8
+- cyclopts >=4.22.0,<5
 - pip
 - pip:
   - --index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+  - -e .
   - pyvista[all]>=0.46.3, <0.47
+  - diffdrr>=0.6.1, <0.7
+

@@ -2,7 +2,10 @@ from pathlib import Path
 
 import pytest
 
+import numpy as np
+
 from sparse_view_dataset.projection import _append_failed_case_log, _build_device_schedule, _project_one_case_safe
+from sparse_view_dataset.projection_angles import ProjectionAngles
 
 
 def test_build_device_schedule_repeats_each_device_evenly():
@@ -36,13 +39,14 @@ def test_project_one_case_safe_returns_failure_tuple(monkeypatch, tmp_path: Path
 
     monkeypatch.setattr("sparse_view_dataset.projection.project_one_case", raise_error)
 
+    angles = ProjectionAngles.from_alpha_beta_list([(0.0, 0.0)])
     succeeded, returned_path, tb = _project_one_case_safe(
         resampled_coronary_file=case_path,
         original_data_dir=tmp_path,
-        angle_configs=[],
+        angles=angles,
         proj_size=(512, 512),
         output_dir=tmp_path,
-        num_of_vis=0,
+        vis=False,
     )
 
     assert succeeded is False

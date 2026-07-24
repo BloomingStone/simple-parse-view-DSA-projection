@@ -161,16 +161,12 @@ class ProjectionConeBeam(nn.Module):
         self.param = param
         self._diffdrr = None  # lazy setup in first forward()
 
-        # alphas/betas 按 ODL angle = -alpha 排序（与旧接口一致）
         if param.alphas is not None:
-            odl_angles = -np.asarray(param.alphas, dtype=float)
-            sort_idx = np.argsort(odl_angles)
-            self.alphas_sorted = -odl_angles[sort_idx]
-            betas_arr = np.asarray(param.betas)
-            self.betas_sorted = betas_arr[sort_idx]
+            self.alphas = np.asarray(param.alphas, dtype=float).copy()
+            self.betas = np.asarray(param.betas, dtype=float).copy()
         else:
-            self.alphas_sorted = np.array([])
-            self.betas_sorted = np.array([])
+            self.alphas = np.array([])
+            self.betas = np.array([])
 
         # DiffDRR PA 重定向矩阵 (RAS → DiffDRR camera)
         self._reorient = torch.tensor([
@@ -188,14 +184,17 @@ class ProjectionConeBeam(nn.Module):
         from diffdrr.drr import DRR
         from torchio import LabelMap, ScalarImage, Subject
 
-        vol_tensor = torch.from_numpy(vol_np).float().unsqueeze(0).to(device)
-        aff_tensor = torch.from_numpy(affine).float().to(device)
+        # torchio 期望 CPU tensor（内部会调用 .numpy()），
+        # 构造完 DRR 后再整个移到目标 device
+        cpu = torch.device("cpu")
+        vol_tensor = torch.from_numpy(vol_np).float().unsqueeze(0).to(cpu)
+        aff_tensor = torch.from_numpy(affine).float().to(cpu)
 
         subject = Subject(
             volume=ScalarImage(tensor=vol_tensor, affine=aff_tensor),
             density=ScalarImage(tensor=vol_tensor, affine=aff_tensor),
             mask=LabelMap(tensor=torch.zeros_like(vol_tensor, dtype=torch.long), affine=aff_tensor),
-            reorient=self._reorient.to(device),
+            reorient=self._reorient.to(cpu),
         )
 
         delx = float(self.param.sw / self.param.nw)
@@ -219,14 +218,14 @@ class ProjectionConeBeam(nn.Module):
             self._setup_diffdrr(vol_np, self.param.affine, device)
 
         # (N, 3) = [alpha, beta, 0] -> DiffDRR: ZXY intrinsic
-        alphas = torch.from_numpy(self.alphas_sorted).float().to(device)
-        betas = torch.from_numpy(self.betas_sorted).float().to(device)
+        alphas = torch.from_numpy(self.alphas).float().to(device)
+        betas = torch.from_numpy(self.betas).float().to(device)
         rots = torch.stack([alphas, betas, torch.zeros_like(alphas)], dim=-1)
         trans = self._trans.to(device)
 
         assert self._diffdrr is not None
         drr_img = self._diffdrr(
-            -rots, trans,
+            - rots, trans,  # attention: DiffDRR expects negative angles for rotation
             parameterization="euler_angles",
             convention="ZXY",
         )
@@ -241,12 +240,11 @@ class ProjectionConeBeam(nn.Module):
 
     def to_dict(self) -> dict:
         """导出元数据，包含从 (alpha, beta) 计算的 R/T。"""
-        R, T = _compute_R_T(self.alphas_sorted, self.betas_sorted, self.param.dso)
+        R, T = _compute_R_T(self.alphas, self.betas, self.param.dso)
         d = {
             "param": self.param.to_dict(),
-            "angles": (-self.alphas_sorted).tolist(),
-            "alphas": self.alphas_sorted.tolist(),
-            "betas": self.betas_sorted.tolist(),
+            "alphas": self.alphas.tolist(),
+            "betas": self.betas.tolist(),
             "R": R.tolist(),
             "T": T.tolist(),
         }

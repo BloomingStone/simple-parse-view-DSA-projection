@@ -88,7 +88,7 @@ class TestConeBeamGeometrySourcePosition:
         # Compute expected source positions via Euler Z-X
         expected = np.array([
             R_z(-a) @ R_x(-b) @ np.array([0.0, -params.dso, 0.0])
-            for a, b in zip(proj.alphas_sorted, proj.betas_sorted)
+            for a, b in zip(proj.alphas, proj.betas)
         ])
 
         assert np.allclose(T_exported, expected,
@@ -106,23 +106,24 @@ class TestConeBeamGeometrySourcePosition:
         T_exported = np.array(d["T"])
         expected = np.array([
             R_z(-a) @ R_x(-b) @ np.array([0.0, -params.dso, 0.0])
-            for a, b in zip(proj.alphas_sorted, proj.betas_sorted)
+            for a, b in zip(proj.alphas, proj.betas)
         ])
         assert np.allclose(T_exported, expected, atol=1e-5)
 
 
 class TestProjectionConeBeamAlphaBeta:
-    def test_alphas_sorted_property(self, volume_params, sample_angles):
+    def test_alphas_betas_preserve_order(self, volume_params, sample_angles):
         params = ConeBeamParams.init_from_angles(
             **volume_params,
             alphas=sample_angles["alphas"],
             betas=sample_angles["betas"],
         )
         proj = params.get_projection()
-        assert len(proj.alphas_sorted) == 7
-        assert len(proj.betas_sorted) == 7
-        # angles in to_dict = -alphas_sorted (up to sorting)
-        assert np.allclose(np.array(proj.to_dict()["angles"]), -proj.alphas_sorted)
+        assert len(proj.alphas) == 7
+        assert len(proj.betas) == 7
+        # 顺序应与传入的一致
+        assert np.allclose(proj.alphas, sample_angles["alphas"])
+        assert np.allclose(proj.betas, sample_angles["betas"])
 
     def test_forward_projection_shape(self, volume_params, sample_angles):
         params = ConeBeamParams.init_from_angles(
@@ -151,7 +152,6 @@ class TestProjectionConeBeamAlphaBeta:
         d = proj.to_dict()
         assert "alphas" in d
         assert "betas" in d
-        assert "angles" in d
         assert len(d["alphas"]) == 7
         assert len(d["betas"]) == 7
 
@@ -218,8 +218,8 @@ class TestTorch3DLabelRendererAlphaBeta:
             dso=400.0,
         )
         projection = params.get_projection()
-        assert len(projection.alphas_sorted) == 5
-        assert len(projection.betas_sorted) == 5
+        assert len(projection.alphas) == 5
+        assert len(projection.betas) == 5
 
         import pyvista as pv
         from sparse_view_dataset.torch3d_render import Torch3DLabelRenderer

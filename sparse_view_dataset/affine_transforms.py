@@ -8,6 +8,30 @@ from torch.nn import functional as F
 ArrayLike = TypeVar("ArrayLike", bound=Tensor | np.ndarray)
 
 
+def make_affine_spacing_positive(data: np.ndarray, affine: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    spacing = np.diag(affine)[:3]
+    data = data.copy()
+    affine = affine.copy()
+    shape = np.array(data.shape, dtype=int)
+    A = affine[:3, :3]
+    T = affine[:3, 3]
+    if spacing[0] < 0:
+        A[:, 0] = -A[:, 0]
+        T = T - A[:, 0] * (shape[0] - 1)
+        data = np.flip(data, axis=0)
+    if spacing[1] < 0:
+        A[:, 1] = -A[:, 1]
+        T = T - A[:, 1] * (shape[1] - 1)
+        data = np.flip(data, axis=1)
+    if spacing[2] < 0:
+        A[:, 2] = -A[:, 2]
+        T = T - A[:, 2] * (shape[2] - 1)
+        data = np.flip(data, axis=2)
+
+    affine[:3, :3] = A
+    affine[:3, 3] = T
+    return data, affine
+
 def apply_affine(points: ArrayLike, affine: np.ndarray) -> ArrayLike:
     import torch
     from torch.nn import functional as F_local

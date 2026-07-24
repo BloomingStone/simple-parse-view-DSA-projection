@@ -19,79 +19,11 @@ from .cone_beam import ConeBeamParams
 from .torch3d_render import Torch3DLabelRenderer
 from .visualize import plot_cloud_and_projs, save_gif
 from .mesh_utils import get_mesh_in_world, get_label_clouds_in_world
+from .projection_angles import ProjectionAngles
 
 
 _WORKER_DEVICE: torch.device | None = None
 
-
-def load_angle_csv(csv_path: Path) -> tuple[np.ndarray, np.ndarray]:
-    """从 CSV 文件加载 alpha/beta 角度对。
-
-    CSV 格式：两列 (alpha, beta)，可含表头。
-    """
-    # 先尝试跳过表头（如果第一行含非数值）
-    try:
-        data = np.loadtxt(str(csv_path), delimiter=",", skiprows=0)
-    except ValueError:
-        data = np.loadtxt(str(csv_path), delimiter=",", skiprows=1)
-    if data.ndim == 1:
-        data = data.reshape(-1, 2)
-    return np.deg2rad(data[:, 0]), np.deg2rad(data[:, 1])
-
-
-def make_angle_configs(
-    csv_paths: list[Path] | None = None,
-    alpha_betas_list: list[tuple[np.ndarray, np.ndarray]] | None = None,
-    names: list[str] | None = None,
-    num_random: int | None = None,
-) -> list[dict]:
-    """构建角度配置列表。
-
-    Parameters
-    ----------
-    csv_paths : list[Path], optional
-        CSV 文件路径列表，每个文件有两列 (alpha, beta)。
-    alpha_betas_list : list[tuple[ndarray, ndarray]], optional
-        直接指定的 (alphas, betas) 对列表。
-    names : list[str], optional
-        每个配置的名称，用于输出目录命名。若不提供则从 CSV 文件名自动推断。
-    num_random : int, optional
-        若仅需随机测试，生成 num_random 个随机 (alpha, beta) 对。
-
-    Returns
-    -------
-    configs : list[dict]
-        每个 dict 含 'name'、'alphas'、'betas' 三个键。
-    """
-    configs = []
-
-    if num_random is not None:
-        rng = np.random.default_rng(42)
-        alphas = rng.uniform(-np.pi / 3, np.pi / 3, num_random)
-        betas = rng.uniform(-np.pi / 6, np.pi / 6, num_random)
-        configs.append({"name": f"random_{num_random}_projs", "alphas": alphas, "betas": betas})
-        return configs
-
-    name_idx = 0
-    if csv_paths:
-        for csv_path in csv_paths:
-            alphas, betas = load_angle_csv(csv_path)
-            name = names[name_idx] if names and name_idx < len(names) else csv_path.stem
-            name_idx += 1
-            configs.append({"name": name, "alphas": alphas, "betas": betas})
-
-    if alpha_betas_list:
-        for alphas, betas in alpha_betas_list:
-            name = names[name_idx] if names and name_idx < len(names) else f"custom_{len(alphas)}_projs"
-            name_idx += 1
-            configs.append({"name": name, "alphas": alphas, "betas": betas})
-
-    if not configs:
-        raise ValueError(
-            "至少需要提供一种角度配置：CSV 文件、直接指定 alpha/beta 或使用 num_random 指定随机生成数量。"
-        )
-
-    return configs
 
 
 def density_simulation(ori_volume: np.ndarray, coronary_mask: np.ndarray) -> np.ndarray:
@@ -156,25 +88,44 @@ def get_mesh_and_clouds(resampled_cor_data: np.ndarray, resample_cor_affine: np.
 def project_one_case(
     resampled_coronary_file: Path,
     original_data_dir: Path,
-    angle_configs: list[dict],
+    angles: ProjectionAngles,
     proj_size: tuple[int, int],
     output_dir: Path,
-    do_vis: bool = False,
-    device: torch.device | None = None,
+    device: torch.device|None = None,
+    vis: bool = False,
 ) -> None:
     device = device or _get_worker_device()
 
     # Find paths
     case_name, branch_type = parse_name_type(resampled_coronary_file)
-    ori_coronary_file = original_data_dir / "coronary" / f"{case_name}.nii.gz"
     ori_volume_file = original_data_dir / "volume" / f"{case_name}.nii.gz"
-    if not ori_coronary_file.exists():
-        print(f"Original coronary file not found for case {case_name}, skipping (path: {ori_coronary_file}).")
-        return
     if not ori_volume_file.exists():
         print(f"Original volume file not found for case {case_name}, skipping (path: {ori_volume_file}).")
         return
+    
+    _project_one_case_inner(
+        resampled_coronary_file=resampled_coronary_file,
+        ori_volume_file=ori_volume_file,
+        case_name=case_name,
+        branch_type=branch_type,
+        angles=angles,
+        proj_size=proj_size,
+        output_dir=output_dir,
+        device=device,
+        vis=vis,
+    )
 
+def _project_one_case_inner(
+    resampled_coronary_file: Path,
+    ori_volume_file: Path,
+    case_name: str,
+    branch_type: str,
+    angles: ProjectionAngles,
+    proj_size: tuple[int, int],
+    output_dir: Path,
+    device: torch.device,
+    vis: bool = False,
+) -> None:
     # read resampled coronary data: 用于提供roi信息
     # 目前计算骨架和点云时都使用 resampled_cor_affine_centered 来进行坐标变换，以保证和渲染器的坐标系一致
     # 此处理流程继承自之前版本的实现，后续可以考虑使用 ori_cor_data 进行处理，效果理论上一样。
@@ -221,87 +172,85 @@ def project_one_case(
         print(f"Empty mesh for {resampled_coronary_file}, skipping.")
         return
 
-    for cfg in angle_configs:
-        name = cfg["name"]
-        alphas = cfg["alphas"]
-        betas = cfg["betas"]
+    alphas = angles.alphas
+    betas = angles.betas
 
-        ori_geo_param = ConeBeamParams.init_from_angles(
-            volume_size=ori_vol_data.shape,
-            affine=ori_affine_centralized,
-            alphas=alphas,
-            betas=betas,
-            proj_size=proj_size,
-        )
-        resampled_cor_geo_param = ConeBeamParams.init_from_angles(
-            volume_size=resampled_cor_data.shape,
-            affine=resample_cor_affine_centered,
-            alphas=alphas,
-            betas=betas,
-            proj_size=proj_size,
-        )
-        original_ct_projector = ori_geo_param.get_projection()
-        resampled_cor_ct_projector = resampled_cor_geo_param.get_projection()
-        mesh_renderer = Torch3DLabelRenderer(resampled_cor_ct_projector, device)
+    ori_geo_param = ConeBeamParams.init_from_angles(
+        volume_size=ori_vol_data.shape,
+        affine=ori_affine_centralized,
+        alphas=alphas,
+        betas=betas,
+        proj_size=proj_size,
+    )
+    resampled_cor_geo_param = ConeBeamParams.init_from_angles(
+        volume_size=resampled_cor_data.shape,
+        affine=resample_cor_affine_centered,
+        alphas=alphas,
+        betas=betas,
+        proj_size=proj_size,
+    )
+    original_ct_projector = ori_geo_param.get_projection()
+    resampled_cor_ct_projector = resampled_cor_geo_param.get_projection()
+    mesh_renderer = Torch3DLabelRenderer(resampled_cor_ct_projector, device)
 
-        ori_projs = original_ct_projector(ori_vol_data_tensor).squeeze()
-        label_projs = resampled_cor_ct_projector(resampled_cor_data_tensor).squeeze()
+    ori_projs = original_ct_projector(ori_vol_data_tensor).squeeze()
+    label_projs = resampled_cor_ct_projector(resampled_cor_data_tensor).squeeze()
 
-        xca_raw = torch.exp(- (ori_projs + label_projs * MU_IDODINE))
-        xca_vis = torch.pow(xca_raw, 0.1)  # gamma correction for better visualization
+    xca_raw = torch.exp(- (ori_projs + label_projs * MU_IDODINE))
+    xca_vis = torch.pow(xca_raw, 0.1)  # gamma correction for better visualization
 
-        silhouette, depth, res_clouds = mesh_renderer.render(mesh, point_clouds)
+    silhouette, depth, res_clouds = mesh_renderer.render(mesh, point_clouds)
 
-        res = {
-            "ori_projs": ori_projs.cpu(),   # 保存原始体积（吸收率）的投影结果
-            "xca_raw": xca_raw.cpu(),       # 原始数据叠加冠脉标签后 通过 exp(-x) 转化为相对强度
-            "projs": xca_vis.cpu(),         # xca_raw 经过 gamma 校正后的可视化结果
-            "label_projs": label_projs.cpu(),
-            "mask_2d": silhouette.cpu(),
-            "depth": depth.cpu(),
-            "ori_projs_meta": original_ct_projector.to_dict(),
-            "label_projs_meta": resampled_cor_ct_projector.to_dict(),
-        }
+    res = {
+        "ori_projs": ori_projs.cpu(),   # 保存原始体积（吸收率）的投影结果
+        "xca_raw": xca_raw.cpu(),       # 原始数据叠加冠脉标签后 通过 exp(-x) 转化为相对强度
+        "projs": xca_vis.cpu(),         # xca_raw 经过 gamma 校正后的可视化结果
+        "label_projs": label_projs.cpu(),
+        "mask_2d": silhouette.cpu(),
+        "depth": depth.cpu(),
+        "ori_projs_meta": original_ct_projector.to_dict(),
+        "label_projs_meta": resampled_cor_ct_projector.to_dict(),
+        "angles_meta": angles.meta,
+    }
 
-        for key in res_clouds.keys():
-            assert key not in res
+    for key in res_clouds.keys():
+        assert key not in res
 
-        res.update({k: v.cpu() for k, v in res_clouds.items()})
+    res.update({k: v.cpu() for k, v in res_clouds.items()})
 
-        sub_dir = output_dir / name
-        sub_dir.mkdir(exist_ok=True, parents=True)
+    output_dir.mkdir(exist_ok=True, parents=True)
 
-        res["case_name"] = case_name
-        res["branch_type"] = branch_type
-        torch.save(res, sub_dir / f"{case_name}_{branch_type}.pt")
+    res["case_name"] = case_name
+    res["branch_type"] = branch_type
+    torch.save(res, output_dir / f"{case_name}_{branch_type}.pt")
 
-        if not do_vis:
-            continue
-        
-        vis_dir = sub_dir / "vis" / f"{case_name}_{branch_type}"
-        vis_dir.mkdir(exist_ok=True, parents=True)
-        bg_mask = res["bg_mask"]
-        cl_mask = res["cl_mask"]
+    if not vis:
+        return
+    
+    vis_dir = output_dir / "vis" / f"{case_name}_{branch_type}"
+    vis_dir.mkdir(exist_ok=True, parents=True)
+    bg_mask = res["bg_mask"]
+    cl_mask = res["cl_mask"]
 
-        plot_cloud_and_projs(
-            vis_dir / 'bg_mask_and_projs.gif',
-            bg_mask,
-            ori_projs,
-        )
+    plot_cloud_and_projs(
+        vis_dir / 'bg_mask_and_projs.gif',
+        bg_mask,
+        xca_vis,
+    )
 
-        plot_cloud_and_projs(
-            vis_dir / 'cl_mask_and_depth.gif',
-            cl_mask,
-            depth,
-        )
-        save_gif(vis_dir / 'ori_projs.gif', ori_projs, cmap='gray')
-        save_gif(vis_dir / 'label_projs.gif', label_projs, cmap='gray')
-        save_gif(vis_dir / 'projs.gif', xca_vis, cmap='gray')
-        save_gif(vis_dir / 'xca_raw.gif', xca_raw, cmap='gray')
-        save_gif(vis_dir / 'depth.gif', depth)
-        save_gif(vis_dir / 'mask_2d.gif', silhouette, cmap='gray')
+    plot_cloud_and_projs(
+        vis_dir / 'cl_mask_and_depth.gif',
+        cl_mask,
+        depth,
+    )
+    save_gif(vis_dir / 'ori_projs.gif', ori_projs, cmap='gray')
+    save_gif(vis_dir / 'label_projs.gif', label_projs, cmap='gray')
+    save_gif(vis_dir / 'projs.gif', xca_vis, cmap='gray')
+    save_gif(vis_dir / 'xca_raw.gif', xca_raw, cmap='gray')
+    save_gif(vis_dir / 'depth.gif', depth)
+    save_gif(vis_dir / 'mask_2d.gif', silhouette, cmap='gray')
 
-        torch.cuda.empty_cache()
+    torch.cuda.empty_cache()
 
     return
 
@@ -309,21 +258,21 @@ def project_one_case(
 def _project_one_case_safe(
     resampled_coronary_file: Path,
     original_data_dir: Path,
-    angle_configs: list[dict],
+    angles: ProjectionAngles,
     proj_size: tuple[int, int],
     output_dir: Path,
-    do_vis: bool = False,
-    device: torch.device | None = None,
+    device: torch.device|None = None,
+    vis: bool = False,
 ) -> tuple[bool, Path, str]:
     try:
         project_one_case(
             resampled_coronary_file=resampled_coronary_file,
             original_data_dir=original_data_dir,
-            angle_configs=angle_configs,
+            angles=angles,
             proj_size=proj_size,
             output_dir=output_dir,
             device=device,
-            do_vis=do_vis
+            vis=vis
         )
         return True, resampled_coronary_file, ""
     except Exception:
@@ -365,19 +314,12 @@ def process_resampled_directory(
     resample_coronary_dir: Path,
     original_data_dir: Path,
     output_dir: Path,
-    proj_size: tuple[int, int] = (512, 512),
-    angle_configs: list[dict] | None = None,
+    proj_size: tuple[int, int],
+    angles: ProjectionAngles,
     num_workers: int = 4,
     devices: list[int] | tuple[int, ...] = (0,),
-    do_vis: bool = False,
+    vis: bool = False,
 ) -> None:
-    if angle_configs is None:
-        # 默认：生成一组随机角度用于测试
-        rng = np.random.default_rng(42)
-        alphas = rng.uniform(-np.pi / 3, np.pi / 3, 32)
-        betas = rng.uniform(-np.pi / 6, np.pi / 6, 32)
-        angle_configs = [{"name": "random_32_projs", "alphas": alphas, "betas": betas}]
-
     all_nii_files = list(resample_coronary_dir.rglob("*.nii.gz"))
     nii_files = [
         p for p in all_nii_files
@@ -394,10 +336,10 @@ def process_resampled_directory(
     worker = partial(
         _project_one_case_safe,
         original_data_dir=original_data_dir,
-        angle_configs=angle_configs,
+        angles=angles,
         proj_size=proj_size,
         output_dir=output_dir,
-        do_vis=do_vis,
+        vis=vis,
     )
 
     ctx = mp.get_context("spawn")

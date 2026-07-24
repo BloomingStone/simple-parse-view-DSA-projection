@@ -1,88 +1,98 @@
 from pathlib import Path
 
-import numpy as np
-import typer
+from cyclopts import App, Parameter
 from .constants import (
     DEFAULT_EXPAND,
     DEFAULT_TARGET_SHAPE,
     DEFAULT_TARGET_SPACING,
     DEFAULT_PROJ_SIZE,
 )
+from .projection_angles import ProjectionAngles
 
+app = App(
+    name="sparse_view_dataset", 
+    help="Sparse View Dataset Processing CLI",
+    default_parameter=Parameter(short_alias=True)
+)
 
-app = typer.Typer(help="Sparse coronary projection dataset pipeline.")
-
-
-def _parse_alpha_beta_pairs(pairs_str: str) -> tuple[np.ndarray, np.ndarray]:
-    """解析 "--alpha-betas '0,0;0.1,0.05;0.2,0.1'" 格式的字符串。
-
-    返回 (alphas, betas) 两个 numpy 数组。
-    """
-    pairs = pairs_str.split(";")
-    alphas, betas = [], []
-    for pair in pairs:
-        pair = pair.strip()
-        if not pair:
-            continue
-        parts = pair.split(",")
-        if len(parts) != 2:
-            raise ValueError(f"无效的角度对: '{pair}'，格式应为 'alpha,beta'")
-        alphas.append(float(parts[0]))
-        betas.append(float(parts[1]))
-    if not alphas:
-        raise ValueError("未解析到任何角度对")
-    return np.deg2rad(np.array(alphas)), np.deg2rad(np.array(betas))
-
-
-@app.command("crop")
+@app.command
 def crop(
-    input_path: Path = typer.Argument(..., help="Input file path or data directory"),
-    outdir: Path = typer.Argument(..., help="Output directory"),
-    expand: int = typer.Option(DEFAULT_EXPAND, help="Expand ROI by this many voxels on each side"),
-    target_shape: tuple[int, int, int] = typer.Option(DEFAULT_TARGET_SHAPE, help="Target shape (w,h,d)"),
-    target_spacing: float | None = typer.Option(DEFAULT_TARGET_SPACING, help="Target spacing (mm) - used for spacing adjustment if needed"),
-    workers: int | None = typer.Option(None, help="Number of workers for parallel processing (default: None, will use cpu_count)"),
-    saving_pt: bool = typer.Option(False, help="Save pt files"),
+    input_path: Path,
+    outdir: Path,
+    expand: int = DEFAULT_EXPAND,
+    target_shape: tuple[int, int, int] = DEFAULT_TARGET_SHAPE,
+    target_spacing: float | None = DEFAULT_TARGET_SPACING,
+    workers: int | None = None,
+    saving_pt: bool = False,
 ):
+    """
+    Crop the input data to the region of interest (ROI) and optionally adjust spacing and shape.
+    Args:
+        input_path (Path): Input file path or data directory.
+        outdir (Path): Output directory to save cropped data.
+        expand (int): Expand ROI by this many voxels on each side.
+        target_shape (tuple[int, int, int]): Target shape (w,h,d) for the cropped data.
+        target_spacing (float | None): Target spacing (mm) - used for spacing adjustment if needed.
+        workers (int | None): Number of workers for parallel processing (default: None, will use cpu_count).
+        saving_pt (bool): Whether to save pt files.
+    """
     from .preprocess import process_input_path
 
     process_input_path(input_path, outdir, expand, target_shape, target_spacing, workers, saving_pt)
 
 
-@app.command("project")
+@app.command
 def project(
-    resample_coronary_dir: Path = typer.Argument(..., help="Input directory containing resampled coronary nii files"),
-    original_data_dir: Path = typer.Argument(..., help="Input directory containing coronary dir and volume dir"),
-    output_dir: Path = typer.Argument(..., help="Output directory to save results"),
-    proj_size: tuple[int, int] = typer.Option(DEFAULT_PROJ_SIZE, help="Size of projection images"),
-    angle_csv: list[Path] = typer.Option(None, "--angle-csv", help="CSV file(s) with alpha,beta columns (can be repeated)"),
-    alpha_betas: str | None = typer.Option(None, "--alpha-betas", help="Alpha/beta pairs as 'alpha1,beta1;alpha2,beta2;...'"),
-    num_random: int | None = typer.Option(None, "--num-random", help="Generate N random (alpha,beta) pairs for testing"),
-    num_workers: int = typer.Option(4, help="Number of workers to use"),
-    devices: list[int] = typer.Option([0], "--device", "-d", help="CUDA device ids to use; workers are split evenly across them"),
-    do_vis: bool = typer.Option(False, help="Whether to generate visualization images"),
+    resample_coronary_dir: Path,
+    original_data_dir: Path,
+    output_dir: Path,
+    proj_size: tuple[int, int] = DEFAULT_PROJ_SIZE,
+    angle_csv: Path | None = None,
+    alpha_betas: list[tuple[float, float]] | None = None,
+    num_random: int | None = None,
+    workers: int = 2,
+    devices: list[int] = [0],
+    vis: bool = False,
 ):
-    from .projection import process_resampled_directory, make_angle_configs
+    """
+    Generate projection images from resampled coronary data using specified angles.
+    Choose one of the following methods to specify angles:
+    1. Provide a CSV file with alpha,beta columns (angle_csv).
+    2. Provide a list of (alpha, beta) pairs (alpha_betas).
+    3. Generate N random (alpha, beta) pairs (num_random).
+    
+    Args:
+        resample_coronary_dir (Path): Directory containing resampled coronary nii files.
+        original_data_dir (Path): Directory containing original coronary and volume data.
+        output_dir (Path): Directory to save projection results.
+        proj_size (tuple[int, int]): Size of the projection images.
+        angle_csv (Path | None): CSV file with alpha,beta columns for angles.
+        alpha_betas (list[tuple[float, float]] | None): usage: `--alpha-betas 30 45 --alpha-betas 1.2 4.7`.
+        num_random (int | None): Generate N random (alpha,beta) pairs for testing.
+        num_workers (int): Number of workers to use for processing.
+        devices (list[int]): CUDA device ids to use; workers are split evenly across them.
+        do_vis (bool): Whether to generate visualization images.
+    """
+    
+    match (angle_csv, alpha_betas, num_random):
+        case (Path() as csv_path, None, None):
+            angles = ProjectionAngles.from_csv(csv_path)
+        case (None, list() as ab_list, None):
+            angles = ProjectionAngles.from_alpha_beta_list(ab_list)
+        case (None, None, int() as n_random):
+            angles = ProjectionAngles.from_random(n_random)
+        case _:
+            raise ValueError("Must provide exactly one of angle_csv, alpha_betas, or num_random.")
 
-    # 解析角度配置
-    alpha_betas_list = None
-    if alpha_betas is not None:
-        a, b = _parse_alpha_beta_pairs(alpha_betas)
-        alpha_betas_list = [(a, b)]
-
-    angle_configs = make_angle_configs(
-        csv_paths=angle_csv if angle_csv else None,
-        alpha_betas_list=alpha_betas_list,
-        num_random=num_random,
-    )
-
+    
+    from .projection import process_resampled_directory
     process_resampled_directory(
         resample_coronary_dir=resample_coronary_dir,
         original_data_dir=original_data_dir,
         output_dir=output_dir,
         proj_size=proj_size,
-        angle_configs=angle_configs,
-        num_workers=num_workers,
+        angles=angles,
+        num_workers=workers,
         devices=devices,
-        do_vis=do_vis
+        vis=vis
     )

@@ -95,11 +95,11 @@ data/asoca_size128_spacing0-7/
 ```bash
 # 从 CSV 文件读取角度
 python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 \
-    --proj-size 128 128 --angle-csv angles.csv --do-vis
+    --proj-size 128 128 --angle-csv angles.csv --vis
 
 # 直接指定 alpha/beta 角度对
 python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 \
-    --proj-size 128 128 --alpha-betas "0.0,0.0;0.5,0.1;1.0,0.2" --do-vis
+    --proj-size 128 128 --alpha-betas 30 45 --alpha-betas 1.2 4.7  --vis
 
 # 随机角度测试
 python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 \
@@ -108,7 +108,7 @@ python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/a
 # 多个角度配置 + 多 GPU
 python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 \
     --proj-size 128 128 --angle-csv angles_a.csv --angle-csv angles_b.csv \
-    -d 0 -d 1 --num-workers 16 --do-vis
+    -d 0 -d 1 --num-workers 16 --vis
 ```
 
 也可以直接使用包入口：
@@ -123,10 +123,10 @@ python -m sparse_view_dataset project data/asoca_size128_spacing0-7/ ./ori_data/
 - 原始数据目录：`./ori_data/asoca/`
 - 输出目录：`./data/asoca_proj_128`
 - 投影尺寸：`128 128`
-- `--angle-csv`：CSV 文件路径，含两列 (alpha, beta)，可重复指定多个文件
-- `--alpha-betas`：直接指定角度对，格式为 `"alpha1,beta1;alpha2,beta2;..."`
+- `--angle-csv`：CSV 文件路径，含两列 (alpha, beta)
+- `--alpha-betas`：直接指定角度对，格式为 `--alpha-betas 30 45 --alpha-betas 1.2 4.7`
 - `--num-random`：随机生成 N 个 (alpha, beta) 角度对用于测试
-- `--do-vis`：是否生成可视化图像
+- `--vis`：是否生成可视化图像
 - `--num-workers`：并行处理进程数（默认 4）
 - `-d / --device`：指定 CUDA 设备 ID，可重复（如 `-d 0 -d 1`）
 
@@ -267,10 +267,10 @@ python main.py crop ./ori_data/asoca/coronary/ data/asoca_size128_spacing0-7 --t
 
 生成投影（CSV 中的角度以 **度** 为单位）：
 - 角度可通过以下三种方式之一指定（三选一）：
-  - `--angle-csv path.csv`：从 CSV 文件读取 (alpha, beta) 列，可重复指定多个文件
-  - `--alpha-betas "a1,b1;a2,b2;..."`：命令行直接指定角度对（度）
+  - `--angle-csv path.csv`：从 CSV 文件读取 (alpha, beta) 列
+  - `--alpha-betas 30 45 --alpha-betas 1.2 4.7`：命令行直接指定角度对（度）
   - `--num-random N`：随机生成 N 个角度用于测试
-- `--do-vis`：是否生成可视化图像
+- `--vis`：是否生成可视化图像
 - `--num-workers` 可以增加数据加载的并行度，默认为 4
 - `--devices -d` 可以指定多个 GPU 进行并行处理，（例如 `-d 0 -d 1`） 默认为 0。每个GPU 分配 num-workers / num-devices 个数据加载进程
 
@@ -278,11 +278,11 @@ python main.py crop ./ori_data/asoca/coronary/ data/asoca_size128_spacing0-7 --t
 ```bash
 # CSV 文件方式（角度制）
 python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 \
-    --proj-size 128 128 -d 0 -d 1 --angle-csv sample_angles.csv --do-vis --num-workers 16
+    --proj-size 128 128 -d 0 -d 1 --angle-csv sample_angles.csv --vis --num-workers 16
 
 # 直接指定角度（度）
 python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 \
-    --proj-size 128 128 -d 0 -d 1 --alpha-betas "0,0;10,5;20,10;30,5" --do-vis --num-workers 16
+    --proj-size 128 128 -d 0 -d 1 --alpha-betas 30 45 --alpha-betas 1.2 4.7 --vis --num-workers 16
 ```
 
 ## 8. test

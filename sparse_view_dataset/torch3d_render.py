@@ -118,8 +118,8 @@ class Torch3DLabelRenderer:
 
         # 旋转矩阵和源点位置 — 直接从 (alpha, beta) 欧拉角计算
         # R_c2w = R_z(-alpha) @ R_x(-beta), 源位置 = R_c2w @ (0, -dso, 0)
-        alphas = torch.from_numpy(self.projection.alphas_sorted).to(torch.float32).to(self.device)
-        betas = torch.from_numpy(self.projection.betas_sorted).to(torch.float32).to(self.device)
+        alphas = torch.from_numpy(self.projection.alphas).to(torch.float32).to(self.device)
+        betas = torch.from_numpy(self.projection.betas).to(torch.float32).to(self.device)
         dso = float(self.param.dso)
 
         cos_a = torch.cos(-alphas)

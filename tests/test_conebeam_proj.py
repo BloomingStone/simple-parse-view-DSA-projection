@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from sparse_view_dataset.cone_beam import ConeBeamParams
-from sparse_view_dataset.projection import centerize_affine
+from sparse_view_dataset.affine_transforms import apply_affine, recenter_affine
 from sparse_view_dataset.io import save_nii
 
 # In this case, the input NIfTI file has a rsampled spacing of (0.7, 0.7, 0.7) mm
@@ -65,7 +65,9 @@ def test_cone_beam_projs(
     
     data_tensor = torch.from_numpy(data).float()[None] # (1, W, H, D)
     
-    affine_centered = centerize_affine(img.affine, np.array(img.shape))
+    center_voxel = (np.array(img.shape) - 1) / 2
+    center_world = apply_affine(center_voxel, img.affine)
+    affine_centered = recenter_affine(img.affine, center_world)
     
     cone_beam_params = ConeBeamParams.init_from(
         volume_size=img.shape,
@@ -103,7 +105,9 @@ def test_cone_beam_from_spacing_data(
     
     affine = np.diag(spacing + (1.0,))  # Create a simple affine with the given spacing and no translation
     
-    affine_centered = centerize_affine(affine, np.array(img.shape))
+    center_voxel = (np.array(img.shape) - 1) / 2
+    center_world = apply_affine(center_voxel, affine)
+    affine_centered = recenter_affine(affine, center_world)
     
     cone_beam_params = ConeBeamParams.init_from(
         volume_size=img.shape,
