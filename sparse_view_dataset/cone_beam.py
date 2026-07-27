@@ -240,7 +240,7 @@ class ProjectionConeBeam(nn.Module):
 
         assert self._diffdrr is not None
         drr_img = self._diffdrr(
-            - rots, trans,  # attention: DiffDRR expects negative angles for rotation
+            rots, trans,
             parameterization="euler_angles",
             convention="ZXY",
         )

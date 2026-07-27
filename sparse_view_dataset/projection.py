@@ -37,8 +37,10 @@ def density_simulation(ori_volume: np.ndarray, coronary_mask: np.ndarray) -> np.
 
 def Hu_to_mu(hu_volume: np.ndarray) -> np.ndarray:
     invalid_mask = (hu_volume < -1000)  # anything below -1000 HU is considered invalid and set to 0 attenuation
+    brone_area = (hu_volume > 600)  # anything above 600 HU is considered bone
     mu = hu_volume / 1000.0 * MU_WATER + MU_WATER
     mu[invalid_mask] = 0
+    mu[brone_area] *= 1.5
     return mu
 
 
