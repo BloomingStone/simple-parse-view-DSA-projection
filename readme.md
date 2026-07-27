@@ -205,20 +205,24 @@ data/asoca_proj_128/
 
 ### 角度约定 (alpha / beta)
 
-投影角度使用 C-arm 风格的 (alpha, beta) 欧拉角对（轴顺序 Z-X, intrinsic）：
+投影角度遵循 DICOM XA Positioner Module (C.8.7.5) 定义：
 
-| 参数 | 名称 | 转轴 | 正向含义 |
+- [C.8.7.5 XA Positioner Module](https://dicom.nema.org/medical/dicom/current/output/chtml/part03/sect_C.8.7.5.html#sect_C.8.7.5.1.2)
+
+使用 C-arm 风格的 (alpha, beta) 欧拉角对（轴顺序 Z-X, intrinsic）：
+
+| 参数 | DICOM 名称 | 转轴 | 正向含义 |
 |:---|:---|:---|:---|
-| α (alpha) | RAO (Right Anterior Oblique) | Z (Superior) | 从前向右 = 绕 Z 轴 `-α` 旋转 |
-| β (beta) | CRA (Cranial) | 旋转后的 X | 从前向下 = 绕 X 轴 `-β` 旋转 |
+| α (alpha) | Positioner Primary Angle | Z (Superior → Inferior) | 从右向前 → 绕 Z 轴 `+α` 旋转 |
+| β (beta) | Positioner Secondary Angle | 旋转后的 X (Right → Left) | 从头侧向前 → 绕旋转后的 X 轴 `+β` 旋转 |
 
 源位置计算公式：
 
 ```
-src = R_z(-alpha) @ R_x(-beta) @ (0, -dso, 0)
+src = R_z(alpha) @ R_x(beta) @ (0, dso, 0)
 ```
 
-其中 `dso` 为源到世界原点的距离，初始源位置在患者后方 `(0, -dso, 0)`。
+其中 `dso` 为源到世界原点的距离，初始源位置在患者前方 `(0, dso, 0)`。
 ## 4. 环境安装
 
 推荐使用 pixi：

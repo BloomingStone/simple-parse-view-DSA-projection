@@ -1,7 +1,9 @@
 # Example angle configuration CSV
-# Columns: alpha (RAO), beta (CRA)  in DEGREES
-# Positive alpha = RAO (from front to right, clockwise around Z)
-# Positive beta  = CRA (from front downward, clockwise around rotated X)
+# Columns: alpha (Positioner Primary Angle), beta (Positioner Secondary Angle) in DEGREES
+# Conforms to DICOM XA Positioner Module (C.8.7.5):
+#   - alpha: around Z (SI) axis, positive from right to front
+#   - beta:  around rotated X (RL) axis, positive from front upward
+# Reference: https://dicom.nema.org/medical/dicom/current/output/chtml/part03/sect_C.8.7.5.html#sect_C.8.7.5.1.2
 alpha,beta
 0,0
 6,3

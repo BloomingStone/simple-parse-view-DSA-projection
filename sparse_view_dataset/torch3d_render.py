@@ -65,17 +65,13 @@ class Torch3DLabelRenderer:
         # PyTorch3D 默认相机坐标系：
         #   +Z 为前方，+Y 为上方
         # 而这里的工程约定希望：
-        #   +Y 为前方，+Z 为上方，-X 为左方
+        #   -Y 为前方，+Z 为上方 (射线源在患者前方，朝向患者后方)
         #
         # 因此需要一个固定的重定向旋转，把外部几何坐标系映射到 PyTorch3D 相机约定。
         self.reorient_rot = torch.tensor([
-            [-1,  0,  0 ],
-            [0,   0,  1 ],
+            [1,  0,  0 ],
+            [0,   0,  -1 ],
             [0,   1,  0 ]],
-            #^    ^   ^
-            #|    |   |--column 3 (k) is the front direction of camera, align at +Y (0, 1, 0)
-            #|    |--column 2 (j) is the up direction of camera, align at +Z (0, 0, 1)
-            #|--column 1 (i) is the left direction of camera, align at -X (-1, 0, 0)
             dtype=torch.float32,
             device=self.device
         )
@@ -117,18 +113,18 @@ class Torch3DLabelRenderer:
         mesh = Meshes([verts.to(self.device)], [faces.to(self.device)])
 
         # 旋转矩阵和源点位置 — 直接从 (alpha, beta) 欧拉角计算
-        # R_c2w = R_z(-alpha) @ R_x(-beta), 源位置 = R_c2w @ (0, -dso, 0)
+        # R_c2w = R_z(alpha) @ R_x(beta), 源位置 = R_c2w @ (0, dso, 0)
         alphas = torch.from_numpy(self.projection.alphas).to(torch.float32).to(self.device)
         betas = torch.from_numpy(self.projection.betas).to(torch.float32).to(self.device)
         dso = float(self.param.dso)
 
-        cos_a = torch.cos(-alphas)
-        sin_a = torch.sin(-alphas)
-        cos_b = torch.cos(-betas)
-        sin_b = torch.sin(-betas)
+        cos_a = torch.cos(alphas)
+        sin_a = torch.sin(alphas)
+        cos_b = torch.cos(betas)
+        sin_b = torch.sin(betas)
         zero = torch.zeros_like(cos_a)
 
-        # R_z(-alpha) @ R_x(-beta)  (B, 3, 3)
+        # R_z(alpha) @ R_x(beta)  (B, 3, 3)
         R_c2w = torch.stack([
             torch.stack([cos_a, -cos_b * sin_a,  sin_b * sin_a], dim=-1),
             torch.stack([sin_a,  cos_a * cos_b, -cos_a * sin_b], dim=-1),
@@ -136,7 +132,7 @@ class Torch3DLabelRenderer:
         ], dim=-2)
 
         R = R_c2w @ self.reorient_rot
-        src = R_c2w @ torch.tensor([0.0, -dso, 0.0], device=self.device)
+        src = R_c2w @ torch.tensor([0.0, dso, 0.0], device=self.device)
         T = -torch.einsum("bmn,bn->bm", (R.transpose(-2, -1), src))
 
         n_views = len(alphas)

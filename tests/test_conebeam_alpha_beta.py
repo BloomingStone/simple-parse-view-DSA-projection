@@ -87,7 +87,7 @@ class TestConeBeamGeometrySourcePosition:
 
         # Compute expected source positions via Euler Z-X
         expected = np.array([
-            R_z(-a) @ R_x(-b) @ np.array([0.0, -params.dso, 0.0])
+            R_z(a) @ R_x(b) @ np.array([0.0, params.dso, 0.0])
             for a, b in zip(proj.alphas, proj.betas)
         ])
 
@@ -105,7 +105,7 @@ class TestConeBeamGeometrySourcePosition:
         d = proj.to_dict()
         T_exported = np.array(d["T"])
         expected = np.array([
-            R_z(-a) @ R_x(-b) @ np.array([0.0, -params.dso, 0.0])
+            R_z(a) @ R_x(b) @ np.array([0.0, params.dso, 0.0])
             for a, b in zip(proj.alphas, proj.betas)
         ])
         assert np.allclose(T_exported, expected, atol=1e-5)

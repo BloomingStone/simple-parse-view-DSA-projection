@@ -10,21 +10,26 @@ from torch import Tensor
 def _compute_R_T(alphas: np.ndarray, betas: np.ndarray, dso: float):
     """从 (alpha, beta) 计算旋转矩阵 R 和源位置 T。
 
-    R = R_z(-alpha) @ R_x(-beta)
-    T = R @ (0, -dso, 0)
+    角度约定遵循 DICOM XA Positioner Module (C.8.7.5)：
+      - alpha (Positioner Primary Angle):  绕 Z (SI) 轴，从右向前为正
+      - beta  (Positioner Secondary Angle): 绕旋转后 X (RL) 轴，从头侧向前为正
+    参考 https://dicom.nema.org/medical/dicom/current/output/chtml/part03/sect_C.8.7.5.html#sect_C.8.7.5.1.2
+
+    R = R_z(alpha) @ R_x(beta)
+    T = R @ (0, dso, 0)
     """
-    cos_a, sin_a = np.cos(-alphas), np.sin(-alphas)
-    cos_b, sin_b = np.cos(-betas), np.sin(-betas)
+    cos_a, sin_a = np.cos(alphas), np.sin(alphas)
+    cos_b, sin_b = np.cos(betas), np.sin(betas)
     zero = np.zeros_like(cos_a)
 
-    # (N, 3, 3) R_c2w = R_z(-alpha) @ R_x(-beta)
+    # (N, 3, 3) R_c2w = R_z(alpha) @ R_x(beta)
     R = np.stack([
         np.stack([cos_a, -cos_b * sin_a,  sin_b * sin_a], axis=-1),
         np.stack([sin_a,  cos_a * cos_b, -cos_a * sin_b], axis=-1),
         np.stack([zero,   sin_b,           cos_b],        axis=-1),
     ], axis=-2)
 
-    T = np.einsum("nij,j->ni", R, np.array([0.0, -dso, 0.0]))
+    T = np.einsum("nij,j->ni", R, np.array([0.0, dso, 0.0]))
     return R, T
 
 
@@ -81,12 +86,17 @@ class ConeBeamParams:
     ) -> "ConeBeamParams":
         """从 (alpha, beta) 角度对创建 ConeBeamParams。
 
+        角度约定遵循 DICOM XA Positioner Module (C.8.7.5)：
+          - alpha (Positioner Primary Angle):  绕 Z (SI) 轴，从右向前为正
+          - beta  (Positioner Secondary Angle): 绕旋转后 X (RL) 轴，从头侧向前为正
+        参考 https://dicom.nema.org/medical/dicom/current/output/chtml/part03/sect_C.8.7.5.html#sect_C.8.7.5.1.2
+
         Parameters
         ----------
         volume_size : (D, H, W) 体素网格尺寸
         affine : 4x4 仿射矩阵
-        alphas : (N,) RAO 角度（弧度）
-        betas : (N,) 或 None, CRA 角度（弧度）
+        alphas : (N,) Positioner Primary Angle（弧度）
+        betas : (N,) 或 None, Positioner Secondary Angle（弧度）
         proj_size : (H_det, W_det) 探测器像素数
         dde : detector 到 world origin 距离
         dso : source 到 world origin 距离
@@ -152,8 +162,13 @@ class ConeBeamParams:
 class ProjectionConeBeam(nn.Module):
     """锥束 X 射线投影算子，使用 DiffDRR（trilinear 渲染器）实现。
 
-    接受 (alpha, beta) 角度对，alpha 为主旋转角（绕 Z 轴，RAO），
-    beta 为次角（绕旋转后的 X 轴，CRA）。
+    接受 (alpha, beta) 角度对，alpha 为 Positioner Primary Angle（绕 Z 轴），
+    beta 为 Positioner Secondary Angle（绕旋转后的 X 轴）。
+
+    角度约定遵循 DICOM XA Positioner Module (C.8.7.5)：
+      - alpha: 绕 Z (SI) 轴，从右向前为正
+      - beta:  绕旋转后 X (RL) 轴，从头侧向前为正
+    参考 https://dicom.nema.org/medical/dicom/current/output/chtml/part03/sect_C.8.7.5.html#sect_C.8.7.5.1.2
     """
 
     def __init__(self, param: ConeBeamParams):
@@ -168,16 +183,16 @@ class ProjectionConeBeam(nn.Module):
             self.alphas = np.array([])
             self.betas = np.array([])
 
-        # DiffDRR PA 重定向矩阵 (RAS → DiffDRR camera)
+        # DiffDRR AP 重定向矩阵 (RAS → DiffDRR camera, 射线源在患者前方)
         self._reorient = torch.tensor([
-            [-1, 0, 0, 0],
-            [0, 0, 1, 0],
+            [1, 0, 0, 0],
+            [0, 0, -1, 0],
             [0, 1, 0, 0],
             [0, 0, 0, 1],
         ], dtype=torch.float32)
 
-        # 初始平移: 源在 (0, -dso, 0)（PA 方向）
-        self._trans = torch.tensor([[0.0, -float(param.dso), 0.0]], dtype=torch.float32)
+        # 初始平移: 源在 (0, dso, 0)（AP 方向）
+        self._trans = torch.tensor([[0.0, float(param.dso), 0.0]], dtype=torch.float32)
 
     def _setup_diffdrr(self, vol_np: np.ndarray, affine: np.ndarray, device: torch.device):
         """延迟初始化 DiffDRR。"""
