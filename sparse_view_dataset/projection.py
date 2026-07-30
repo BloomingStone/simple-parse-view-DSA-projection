@@ -37,8 +37,10 @@ def density_simulation(ori_volume: np.ndarray, coronary_mask: np.ndarray) -> np.
 
 def Hu_to_mu(hu_volume: np.ndarray) -> np.ndarray:
     invalid_mask = (hu_volume < -1000)  # anything below -1000 HU is considered invalid and set to 0 attenuation
+    brone_area = (hu_volume > 600)  # anything above 600 HU is considered bone
     mu = hu_volume / 1000.0 * MU_WATER + MU_WATER
     mu[invalid_mask] = 0
+    mu[brone_area] *= 1.5
     return mu
 
 
@@ -148,9 +150,10 @@ def _project_one_case_inner(
     ori_vol_data = Hu_to_mu(ori_vol_data)
 
     def get_new_world_center() -> np.ndarray:
-        cor_shape = np.array(resampled_cor_data.shape)
         ori_shape = np.array(ori_vol_data.shape)
-        cor_center_voxel = (cor_shape - 1) / 2
+        # 冠脉label的重心（非零体素平均坐标），比几何中心更准确
+        cor_indices = np.nonzero(resampled_cor_data)
+        cor_center_voxel = np.array([np.mean(idx) for idx in cor_indices])
         ori_center_voxel = (ori_shape - 1) / 2
         cor_center_world = apply_affine(cor_center_voxel, resample_cor_affine)
         ori_center_world = apply_affine(ori_center_voxel, ori_affine)
