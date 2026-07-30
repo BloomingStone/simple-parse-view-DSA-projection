@@ -37,10 +37,8 @@ def density_simulation(ori_volume: np.ndarray, coronary_mask: np.ndarray) -> np.
 
 def Hu_to_mu(hu_volume: np.ndarray) -> np.ndarray:
     invalid_mask = (hu_volume < -1000)  # anything below -1000 HU is considered invalid and set to 0 attenuation
-    brone_area = (hu_volume > 600)  # anything above 600 HU is considered bone
     mu = hu_volume / 1000.0 * MU_WATER + MU_WATER
     mu[invalid_mask] = 0
-    mu[brone_area] *= 1.5
     return mu
 
 
@@ -95,6 +93,9 @@ def project_one_case(
     output_dir: Path,
     device: torch.device|None = None,
     vis: bool = False,
+    dde: float = 400.0,
+    dso: float = 1400.0,
+    det_spacing: float = 0.3,
 ) -> None:
     device = device or _get_worker_device()
 
@@ -115,6 +116,7 @@ def project_one_case(
         output_dir=output_dir,
         device=device,
         vis=vis,
+        dde=dde, dso=dso, det_spacing=det_spacing,
     )
 
 def _project_one_case_inner(
@@ -127,6 +129,9 @@ def _project_one_case_inner(
     output_dir: Path,
     device: torch.device,
     vis: bool = False,
+    dde: float = 400.0,
+    dso: float = 1400.0,
+    det_spacing: float = 0.3,
 ) -> None:
     # read resampled coronary data: 用于提供roi信息
     # 目前计算骨架和点云时都使用 resampled_cor_affine_centered 来进行坐标变换，以保证和渲染器的坐标系一致
@@ -183,6 +188,7 @@ def _project_one_case_inner(
         alphas=alphas,
         betas=betas,
         proj_size=proj_size,
+        dde=dde, dso=dso, det_spacing=det_spacing,
     )
     resampled_cor_geo_param = ConeBeamParams.init_from_angles(
         volume_size=resampled_cor_data.shape,
@@ -190,6 +196,7 @@ def _project_one_case_inner(
         alphas=alphas,
         betas=betas,
         proj_size=proj_size,
+        dde=dde, dso=dso, det_spacing=det_spacing,
     )
     original_ct_projector = ori_geo_param.get_projection()
     resampled_cor_ct_projector = resampled_cor_geo_param.get_projection()
@@ -265,6 +272,9 @@ def _project_one_case_safe(
     output_dir: Path,
     device: torch.device|None = None,
     vis: bool = False,
+    dde: float = 400.0,
+    dso: float = 1400.0,
+    det_spacing: float = 0.3,
 ) -> tuple[bool, Path, str]:
     try:
         project_one_case(
@@ -274,7 +284,8 @@ def _project_one_case_safe(
             proj_size=proj_size,
             output_dir=output_dir,
             device=device,
-            vis=vis
+            vis=vis,
+            dde=dde, dso=dso, det_spacing=det_spacing,
         )
         return True, resampled_coronary_file, ""
     except Exception:
@@ -321,6 +332,9 @@ def process_resampled_directory(
     num_workers: int = 4,
     devices: list[int] | tuple[int, ...] = (0,),
     vis: bool = False,
+    dde: float = 400.0,
+    dso: float = 1400.0,
+    det_spacing: float = 0.3,
 ) -> None:
     all_nii_files = list(resample_coronary_dir.rglob("*.nii.gz"))
     nii_files = [
@@ -342,6 +356,7 @@ def process_resampled_directory(
         proj_size=proj_size,
         output_dir=output_dir,
         vis=vis,
+        dde=dde, dso=dso, det_spacing=det_spacing,
     )
 
     ctx = mp.get_context("spawn")

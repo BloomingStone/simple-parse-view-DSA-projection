@@ -225,7 +225,6 @@ Thumbs.db
 .venv/
 pixi-env/
 
-data
-ori_data
+*data/
 
 tests/output

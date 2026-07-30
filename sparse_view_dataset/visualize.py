@@ -8,6 +8,11 @@ import pyvista as pv
 import torch
 
 def plot_cloud_and_projs(gif_path: Path, cloud: torch.Tensor, projs: torch.Tensor) -> None:
+    if projs.dim() == 2:
+        projs = projs.unsqueeze(0)
+    if cloud.dim() == 2:
+        cloud = cloud.unsqueeze(0)
+        
     n_proj, h, w = projs.shape
     n_proj_, _, _ = cloud.shape
     assert n_proj == n_proj_
@@ -45,6 +50,9 @@ def save_gif(output_path: Path, frames: torch.Tensor | np.ndarray, fps_gif: int 
         frames_np = frames.cpu().numpy()
     else:
         frames_np = frames
+    
+    if frames_np.ndim == 2:
+        frames_np = frames_np[np.newaxis, :, :]
 
     if "vmin" not in imshow_kwargs or "vmax" not in imshow_kwargs:
         vmin, vmax = np.percentile(frames_np, [0.05, 99.5])

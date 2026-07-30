@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
+from .constants import DEFAULT_PROJ_SIZE
+
 
 def _compute_R_T(alphas: np.ndarray, betas: np.ndarray, dso: float):
     """从 (alpha, beta) 计算旋转矩阵 R 和源位置 T。
@@ -60,6 +62,7 @@ class ConeBeamParams:
         proj_range: float = np.pi,
         dde: float = 400,
         dso: float = 1400,
+        det_spacing: float = 0.3,
     ) -> "ConeBeamParams":
         """旧接口兼容：生成均匀角度并转换为 (alpha, beta) 模式。
 
@@ -72,6 +75,7 @@ class ConeBeamParams:
             volume_size=volume_size, affine=affine,
             alphas=alphas, betas=betas,
             proj_size=proj_size, dde=dde, dso=dso,
+            det_spacing=det_spacing,
         )
 
     @staticmethod
@@ -83,6 +87,7 @@ class ConeBeamParams:
         proj_size: tuple[int, int],
         dde: float = 400,
         dso: float = 1400,
+        det_spacing: float = 0.3,
     ) -> "ConeBeamParams":
         """从 (alpha, beta) 角度对创建 ConeBeamParams。
 
@@ -100,6 +105,7 @@ class ConeBeamParams:
         proj_size : (H_det, W_det) 探测器像素数
         dde : detector 到 world origin 距离
         dso : source 到 world origin 距离
+        det_spacing : 探测器像素间距 (mm/pixel), 默认 0.3
         """
         assert len(volume_size) == 3
         nVoxels = np.array(volume_size, dtype=int)
@@ -114,8 +120,7 @@ class ConeBeamParams:
         max_pt_world = np.maximum(origin_world, shape_world)
 
         num_proj = len(alphas)
-        dh = 512 * 0.3 / proj_size[0]
-        dw = 512 * 0.3 / proj_size[1]
+        dh, dw = det_spacing, det_spacing
         nh = proj_size[0]
         nw = proj_size[1]
         sh = nh * dh

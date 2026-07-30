@@ -19,7 +19,7 @@
 
 ## 1. crop 子命令
 
-- [ ] TODO **现在 `crop` 处理尺寸存在问题 比如即使设定了 `target-shape`，输出的 shape 仍然可能不完全等于目标值，可能是因为 spacing 的优先级更高。有一些长度超过 target shape 的边不会进行处理**
+- [x] ~~**现在 `crop` 处理尺寸存在问题 比如即使设定了 `target-shape`，输出的 shape 仍然可能不完全等于目标值，可能是因为 spacing 的优先级更高。有一些长度超过 target shape 的边不会进行处理**~~ **已修复：`target_spacing` 和 `target_shape` 现在互斥，二者只能选其一。若设定了 `target_spacing`，则只按 spacing 缩放，忽略 `target_shape`；否则按 `target_shape` 缩放。**
 
 `crop` 的职责只有一个：把原始冠脉标签整理成统一尺寸、统一 spacing、统一方向的局部 ROI。核心逻辑都在包内以下模块中：
 
@@ -31,7 +31,9 @@
 1. 使用连通域把冠脉分成两个主分支，并按质心位置区分 LCA 和 RCA。
 2. 对每个分支计算轴对齐包围盒，并向外扩展若干体素。
 3. 如果 affine 中存在负 spacing，则翻转数据并同步修正 affine，统一空间方向。
-4. 将裁剪后的 ROI 重采样到目标 shape；如果指定 `target-spacing`，则先按 spacing 缩放，再做必要填充。
+4. 将裁剪后的 ROI 重采样——`target_spacing` 和 `target_shape` 互斥，只能选其一：
+   - 如果指定 `target-spacing`，则只按 spacing 缩放，`target-shape` 被忽略；
+   - 否则按 `target-shape` 缩放。
 
 ### 使用方法
 
@@ -84,7 +86,7 @@ data/asoca_size128_spacing0-7/
 3. 将原始体数据转换为模拟衰减系数，其中冠脉区域设置为更高的碘造影剂衰减值，背景近似水，无效值置零。
 4. 把重采样后的冠脉标签中心化，让局部 ROI 的中心与世界坐标原点对齐，便于投影几何统一。
 5. 同时将原始体数据和冠脉标签数据的 affine 修正为同一套坐标约定（世界坐标中心在重采样后的冠脉ROI中心），保证后续 DiffDRR 和 PyTorch3D 的空间对齐。
-6. 使用 DiffDRR 生成指定 (alpha, beta) 角度下的 DRR（ZXY 欧拉角，intrinsic）。角度可通过 CSV 文件、命令行直接指定或随机生成。
+6. 使用 DiffDRR 生成指定 (alpha, beta) 角度下的 DRR（ZXY 欧拉角，intrinsic）。角度可通过命令行直接指定或随机生成。
 7. 使用 PyVista 提取冠脉表面 mesh，再通过 PyTorch3D 渲染出 mask 和 depth。
 8. 对冠脉体素点和中心线点进行同样的空间对齐，并输出成点云。
 
@@ -93,10 +95,6 @@ data/asoca_size128_spacing0-7/
 当前主流程如下：
 
 ```bash
-# 从 CSV 文件读取角度
-python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 \
-    --proj-size 128 128 --angle-csv angles.csv --vis
-
 # 直接指定 alpha/beta 角度对
 python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 \
     --proj-size 128 128 --alpha-betas 30 45 --alpha-betas 1.2 4.7  --vis
@@ -104,11 +102,6 @@ python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/a
 # 随机角度测试
 python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 \
     --proj-size 128 128 --num-random 32
-
-# 多个角度配置 + 多 GPU
-python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 \
-    --proj-size 128 128 --angle-csv angles_a.csv --angle-csv angles_b.csv \
-    -d 0 -d 1 --num-workers 16 --vis
 ```
 
 也可以直接使用包入口：
@@ -123,12 +116,16 @@ python -m sparse_view_dataset project data/asoca_size128_spacing0-7/ ./ori_data/
 - 原始数据目录：`./ori_data/asoca/`
 - 输出目录：`./data/asoca_proj_128`
 - 投影尺寸：`128 128`
-- `--angle-csv`：CSV 文件路径，含两列 (alpha, beta)
-- `--alpha-betas`：直接指定角度对，格式为 `--alpha-betas 30 45 --alpha-betas 1.2 4.7`
+- `--alpha-betas`：直接指定角度对（度），格式为 `--alpha-betas 30 45 --alpha-betas 1.2 4.7`
 - `--num-random`：随机生成 N 个 (alpha, beta) 角度对用于测试
 - `--vis`：是否生成可视化图像
 - `--num-workers`：并行处理进程数（默认 4）
 - `-d / --device`：指定 CUDA 设备 ID，可重复（如 `-d 0 -d 1`）
+
+**C-arm 几何参数**（影响投影图像的空间分辨率与放大倍率）：
+- `--dde`：探测器到世界原点距离（mm，默认 400）。增大 → 探测器更远 → 图像放大倍率增大。
+- `--dso`：射线源到世界原点距离（mm，默认 1400）。增大 → 源更远 → 图像放大倍率减小。
+- `--det-spacing`：探测器像素间距（mm/pixel，默认 0.3）。减小 → 像素更精细 → 视野变小。
 
 ### 输出结果
 
@@ -162,7 +159,73 @@ data/asoca_proj_128/
 
 其中点云坐标已经和二维投影对齐，可以把 `x`、`z` 看作图像平面中的位置，把 `y` 看作深度或高度通道，但由于 NDC 空间归一化，无法与 `depth` 完全对应，实际训练时仍然需要使用 `depth`。由于 `depth` 来自 mesh 表面而不是体素内部，因此它和点云只能近似对应，不能要求逐点完全相等。
 
-## 3. 数据与坐标约定
+## 3. project-once 子命令
+
+`project-once` 用于对**单个病例**快速生成投影，无需批处理目录结构。适合调试、测试单组参数或处理真实临床数据。
+
+### 运行原理
+
+与 `project` 的核心投影逻辑相同（共用 `_project_one_case_inner`），区别在于：
+
+- 直接指定冠脉标签 NIfTI 和原始 CT 体积 NIfTI 的路径。
+- 可通过 `--ref-dicom-or-json` 从 DICOM 文件（`.dcm`）或 JSON 文件（`.json`）中**自动读取**投影参数：
+  - 图像尺寸（`Rows`, `Columns`） → `proj_size`
+  - 机架角度（`PositionerPrimaryAngle`, `PositionerSecondaryAngle`） → `alpha`, `beta`
+  - 源到探测器距离（`DistanceSourceToDetector`）和源到患者距离（`DistanceSourceToPatient`） → 自动计算 `dde` 和 `dso`
+  - 探测器像素间距（`ImagerPixelSpacing`） → `det_spacing`
+- 任何 CLI 直接传入的参数（`--proj-size`, `--alpha-betas`, `--dde`, `--dso`, `--det-spacing`）**会覆盖**参考文件中读取的值。
+
+### 使用方法
+
+```bash
+# 从 DICOM 文件读取所有参数（proj_size、角度、dde/dso、det_spacing）
+python main.py project-once \
+    data/asoca_size128_spacing0-7/Diseased_17/Diseased_17_lca.nii.gz \
+    ori_data/asoca/volume/Diseased_17.nii.gz \
+    output/single_case/ \
+    --ref-dicom-or-json ori_data/ref.json \
+    --vis
+
+# 从 JSON 读取基础参数，但覆盖角度和 dde/dso
+python main.py project-once \
+    data/asoca_size128_spacing0-7/Diseased_17/Diseased_17_lca.nii.gz \
+    ori_data/asoca/volume/Diseased_17.nii.gz \
+    output/single_case/ \
+    --ref-dicom-or-json ori_data/ref.json \
+    --alpha-betas 30 45 \
+    --dde 261.87 --dso 735.13 \
+    --vis
+
+# 完全手动指定所有参数
+python main.py project-once \
+    data/asoca_size128_spacing0-7/Diseased_17/Diseased_17_lca.nii.gz \
+    ori_data/asoca/volume/Diseased_17.nii.gz \
+    output/single_case/ \
+    --proj-size 512 512 \
+    --alpha-betas 39.2 0.1 \
+    --dde 261.87 --dso 735.13 \
+    --det-spacing 0.278875 \
+    --vis
+```
+
+参数含义：
+
+- `coronary_path`：重采样后的冠脉标签 NIfTI 文件路径（例如 `.../Diseased_17_lca.nii.gz`）。
+- `volume_path`：原始 CT 体积 NIfTI 文件路径。
+- `output_dir`：输出目录，结果保存为 `{case_name}_{branch_type}.pt`。
+- `--ref-dicom-or-json`：参考 DICOM（`.dcm`）或 JSON（`.json`）文件，从中读取投影参数。
+- `--proj-size`：覆盖投影图像尺寸（rows, cols）。
+- `--alpha-betas`：覆盖角度对（度），格式为 `--alpha-betas 39.2 0.1`。
+- `--dde`：覆盖探测器到世界原点距离（mm）。
+- `--dso`：覆盖射线源到世界原点距离（mm）。
+- `--det-spacing`：覆盖探测器像素间距（mm/pixel）。
+- `--vis`：是否生成可视化图像。
+
+### 输出结果
+
+与 `project` 子命令的输出格式一致，`.pt` 文件包含 `projs`、`label_projs`、`mask_2d`、`depth`、`bg_mask`、`cl_mask` 等键（详见上一节）。
+
+## 4. 数据与坐标约定
 
 这个项目最重要的约定是“先统一空间，再做投影”。具体来说：
 
@@ -223,7 +286,27 @@ src = R_z(alpha) @ R_x(beta) @ (0, dso, 0)
 ```
 
 其中 `dso` 为源到世界原点的距离，初始源位置在患者前方 `(0, dso, 0)`。
-## 4. 环境安装
+
+### C-arm 几何参数（dde / dso / det_spacing）
+
+这些参数共同控制 C-arm 的几何配置和投影图像的物理分辨率：
+
+```
+SDD (Source-Detector Distance) = dde + dso
+SOD (Source-Object Distance)   = dso
+```
+
+| 参数 | 说明 | 默认值 | 增大后的效果 |
+|:---|:---|:---|:---|
+| `dde` | 探测器到世界原点距离 (mm) | 400 | 探测器远离 → 放大倍率增大 |
+| `dso` | 射线源到世界原点距离 (mm) | 1400 | 源远离 → 放大倍率减小 |
+| `det_spacing` | 探测器像素间距 (mm/pixel) | 0.3 | 像素变粗 → 视野增大，分辨率降低 |
+
+从 DICOM 标签计算：
+- `dso = DistanceSourceToPatient (0018,1111)`
+- `dde = DistanceSourceToDetector (0018,1110) - DistanceSourceToPatient (0018,1111)`
+
+## 5. 环境安装
 
 推荐使用 pixi：
 
@@ -243,15 +326,15 @@ pixi install --frozen
 conda env create -f environment.yaml
 ```
 
-## 5. 注意事项
+## 6. 注意事项
 
-- `project` 依赖 CUDA、DiffDRR、PyTorch3D 和 PyVista，运行前需要保证这些组件可用。
+- `project` 和 `project-once` 依赖 CUDA、DiffDRR、PyTorch3D 和 PyVista，运行前需要保证这些组件可用。
 - 投影算子仅使用 DiffDRR（trilinear 渲染器），已移除 ODL 依赖。
 - 原始数据目录需要同时包含 `coronary/` 和 `volume/` 两个子目录，且同一病例文件名必须一致。
 - `separate_coronary` 默认按连通域和质心位置区分 LCA / RCA，假设输入坐标方向与原始数据一致。
 - 如果输入标签不是标准 NIfTI，或者冠脉不是两个主要连通分支，分支拆分结果可能不稳定。
 
-## 6. 开发建议
+## 7. 开发建议
 
 - 如果你要改裁剪、连通域或 affine 规则，优先看 [sparse_view_dataset/preprocess.py](sparse_view_dataset/preprocess.py) 和 [sparse_view_dataset/affine_transforms.py](sparse_view_dataset/affine_transforms.py)。
 - 如果你要改投影几何或投影算子，优先看 [sparse_view_dataset/cone_beam.py](sparse_view_dataset/cone_beam.py)（ProjectionConeBeam — DiffDRR）以及 [sparse_view_dataset/projection.py](sparse_view_dataset/projection.py)（pipeline 编排）。
@@ -261,7 +344,7 @@ conda env create -f environment.yaml
 - 如果你要改 I/O（NIfTI / .pt），优先看 [sparse_view_dataset/io.py](sparse_view_dataset/io.py)。
 - 如果你要改命令行参数、增加子命令，优先看 [sparse_view_dataset/cli.py](sparse_view_dataset/cli.py)。
 
-## 7. 命令速查
+## 8. 命令速查
 
 预处理：
 
@@ -269,29 +352,36 @@ conda env create -f environment.yaml
 python main.py crop ./ori_data/asoca/coronary/ data/asoca_size128_spacing0-7 --target-spacing 0.7 --target-shape 128 128 128
 ```
 
-生成投影（CSV 中的角度以 **度** 为单位）：
-- 角度可通过以下三种方式之一指定（三选一）：
-  - `--angle-csv path.csv`：从 CSV 文件读取 (alpha, beta) 列
+批量生成投影：
+- 角度通过以下两种方式之一指定（二选一）：
   - `--alpha-betas 30 45 --alpha-betas 1.2 4.7`：命令行直接指定角度对（度）
   - `--num-random N`：随机生成 N 个角度用于测试
 - `--vis`：是否生成可视化图像
 - `--num-workers` 可以增加数据加载的并行度，默认为 4
-- `--devices -d` 可以指定多个 GPU 进行并行处理，（例如 `-d 0 -d 1`） 默认为 0。每个GPU 分配 num-workers / num-devices 个数据加载进程
+- `--devices -d` 可以指定多个 GPU 进行并行处理，（例如 `-d 0 -d 1`） 默认为 0。每个 GPU 分配 num-workers / num-devices 个数据加载进程
+- `--dde / --dso / --det-spacing`：C-arm 几何参数，详见上述说明
 
 
 ```bash
-# CSV 文件方式（角度制）
-python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 \
-    --proj-size 128 128 -d 0 -d 1 --angle-csv sample_angles.csv --vis --num-workers 16
-
 # 直接指定角度（度）
 python main.py project data/asoca_size128_spacing0-7/ ./ori_data/asoca/ ./data/asoca_proj_128 \
     --proj-size 128 128 -d 0 -d 1 --alpha-betas 30 45 --alpha-betas 1.2 4.7 --vis --num-workers 16
 ```
 
-## 8. test
+单病例投影（从 DICOM/JSON 参考文件读取参数）：
 
-- [ ] TODO 需要更新下载链接
+```bash
+python main.py project-once \
+    data/asoca_size128_spacing0-7/Diseased_17/Diseased_17_lca.nii.gz \
+    ori_data/asoca/volume/Diseased_17.nii.gz \
+    output/single_case/ \
+    --ref-dicom-or-json ori_data/ref.json \
+    --vis
+```
+
+## 9. TODO
+
+- [ ] 需要更新下载链接
 
 可以在这里下载 [test_data](https://drive.google.com/drive/folders/1Gt5i_6Yvr-s1T9pTs_or9qTj4VUfyJ2L?usp=sharing)
 

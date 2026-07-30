@@ -77,27 +77,19 @@ def resample_to_shape(
     return resampled, new_affine
 
 
-def resample_to_shape_and_spacing(
+def resample_to_spacing(
     data: np.ndarray,
     affine: np.ndarray,
-    target_shape: tuple[int, int, int],
     target_spacing: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     orig_spacing = np.abs(np.diag(affine))[:3]
     scale_factors = orig_spacing / target_spacing
 
-    resampled = ndi.zoom(data, scale_factors, order=0)
-    
-    pad_before = [max(0, int(target_shape[i] - resampled.shape[i]) // 2) for i in range(3)]     # type: ignore
-    pad_after = [max(0, int(target_shape[i] - resampled.shape[i] - pad_before[i])) for i in range(3)]   # type: ignore
-    pad_width_tuple = tuple((pad_before[i], pad_after[i]) for i in range(3))
-    resampled = np.pad(np.asarray(resampled), pad_width_tuple, mode="constant", constant_values=0)
+    resampled = np.asarray(ndi.zoom(data, scale_factors, order=0))
 
     scale_diag = np.ones(4, dtype=float)
     scale_diag[:3] = 1.0 / scale_factors
     new_affine = affine @ np.diag(scale_diag)
-    pad_before_vec = np.array([pad_before[0], pad_before[1], pad_before[2]], dtype=float)
-    new_affine[:3, 3] = new_affine[:3, 3] - (new_affine[:3, :3] @ pad_before_vec)
     return resampled, new_affine
 
 
@@ -118,12 +110,12 @@ def process_single_input(
         label, affine = crop_expanded_roi(branch_label, ori_affine, iterations=expand)
         label, affine = make_affine_spacing_positive(label, affine)
 
-        if target_spacing is None:
-            label_resampled, affine_resampled = resample_to_shape(label, affine, target_shape)
+        if target_spacing is not None:
+            # Resample to target spacing only (target_shape is ignored)
+            label_resampled, affine_resampled = resample_to_spacing(label, affine, target_spacing)
         else:
-            label_resampled, affine_resampled = resample_to_shape_and_spacing(
-                label, affine, target_shape, target_spacing
-            )
+            # Resample to target shape only
+            label_resampled, affine_resampled = resample_to_shape(label, affine, target_shape)
 
         base_name = input_file.stem.split(".")[0]
         save_nii(outdir, base_name, branch_type, label_resampled.astype(np.uint8), affine_resampled)
@@ -146,15 +138,18 @@ def process_input_path(
     2. Separating LCA and RCA coronary branches
     3. Cropping and expanding ROIs for each branch
     4. flip data and adjust affine to make spacing positive
-    5. Resampling to target shape assigned by `target_shape` (if `target_spacing` set, also resample to it by zoom and necessary padding, therefore the shape may be larger than `target_shape`)
+    5. Resampling — either to target spacing (if `target_spacing` is set, `target_shape` is ignored)
+       or to target shape (if `target_spacing` is None). The two options are mutually exclusive.
     6. Saving results NIfTI files. output path as `outdir/<input_nii_path_relative_to_input_path>/<input_nii_name>_<branch_type>.nii.gz`
     
     Args:
         input_path: Path to input NIfTI file or directory containing NIfTI files
         outdir: Output directory for processed files
         expand: Number of voxels to expand ROI on each side (default: 5)
-        target_shape: Target output shape in (d,w,h) format (default: (256, 256, 256))
-        target_spacing: Target output spacing in mm (default: None, recommended: 0.5)
+        target_shape: Target output shape in (d,w,h) format (default: (256, 256, 256)).
+                      Only used when target_spacing is None.
+        target_spacing: Target output spacing in mm (default: None, recommended: 0.5).
+                        When set, target_shape is ignored and the output is only resampled to this spacing.
     """
     if input_path.is_dir():
         # 并行处理目录下的多个 nii.gz 文件，默认使用系统 CPU 数量

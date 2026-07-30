@@ -1,34 +1,11 @@
-from pathlib import Path
 from dataclasses import dataclass
 
 import numpy as np
 
 
-def load_angle_csv(csv_path: Path) -> tuple[np.ndarray, np.ndarray]:
-    """从 CSV 文件加载 alpha/beta 角度对。
-
-    CSV 格式：两列 (alpha, beta)，可含表头。
-    Returns:
-        tuple[np.ndarray, np.ndarray]: 两个数组，分别为 alpha 和 beta 角（以弧度为单位）。
-    """
-    # 先尝试跳过表头（如果第一行含非数值）
-    try:
-        data = np.loadtxt(str(csv_path), delimiter=",", skiprows=0)
-    except ValueError:
-        data = np.loadtxt(str(csv_path), delimiter=",", skiprows=1)
-    if data.ndim == 1:
-        data = data.reshape(-1, 2)
-    return np.deg2rad(data[:, 0]), np.deg2rad(data[:, 1])
-
 @dataclass
 class ProjectionAngles:
     alpha_beta: np.ndarray  # shape: (N, 2), in radians
-    
-    @staticmethod
-    def from_csv(csv_path: Path) -> "ProjectionAngles":
-        alphas_deg, betas_deg = load_angle_csv(csv_path)
-        # load_angle_csv returns radians, so convert back to degrees before passing to from_alpha_beta_arrays
-        return ProjectionAngles(np.column_stack((alphas_deg, betas_deg)))
     
     @staticmethod
     def from_alpha_beta_list(angles: list[tuple[float, float]]) -> "ProjectionAngles":

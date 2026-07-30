@@ -13,9 +13,7 @@ authors = [ { name = "shi_jie", email = "1592277253@qq.com" } ]
 dependencies = []
 
 [project.scripts]
-# Console entry point stub. Implement generate_pyproject.main in your package to generate
-# a pyproject.toml by scanning the current directory.
-gen-pyproject = "generate_pyproject:main"
+gen-data = "sparse_view_dataset.cli:app"
 
 [tool.generate-pyproject]
 # Configuration for a generator that scans the current directory and writes pyproject.toml.

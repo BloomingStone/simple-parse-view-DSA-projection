@@ -12,6 +12,7 @@ index-url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 [tasks]
 crop = "python main.py crop"
 project = "python main.py project"
+project-once = "python main.py project-once"
 
 [dependencies]
 pytorch-gpu = "==2.8.0"
@@ -25,6 +26,7 @@ odl = ">=0.8.3,<0.9"
 astra-toolbox = ">=2.4.0,<3"
 notebook = ">=7.5.6,<8"
 cyclopts = ">=4.22.0,<5"
+pydicom = ">=3.0.2,<4"
 
 
 [pypi-dependencies]
